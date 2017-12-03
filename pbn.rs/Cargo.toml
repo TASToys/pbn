@@ -1,0 +1,13 @@
+[package]
+name = "pbn-rs"
+version = "0.1.0"
+authors = ["pbn"]
+
+[dependencies]
+rocket = { git = "https://github.com/SergioBenitez/Rocket" }
+rocket_codegen = { git = "https://github.com/SergioBenitez/Rocket" }
+postgres = "0.15"
+md5 = "0.3.6"
+
+[profile.release]
+debug=true
