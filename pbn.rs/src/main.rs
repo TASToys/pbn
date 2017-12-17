@@ -1,34 +1,26 @@
-#![feature(plugin, decl_macro)]
+#![feature(plugin, decl_macro, custom_derive)]
 #![plugin(rocket_codegen)]
 
 extern crate rocket;
 extern crate postgres;
 extern crate md5;
 use postgres::{Connection, TlsMode};
-use rocket::request::Request;
+use rocket::request::{FromRequest, Form, Request};
+use rocket::outcome::Outcome;
 use rocket::response::{Responder, Response};
 use rocket::http::{Header, Status};
+use rocket::Data;
+use std::borrow::Cow;
+use std::fmt::Write as FmtWrite;
 use std::io::Cursor;
-
-#[derive(Debug)]
-struct SendFileAs(&'static str, Vec<u8>);
-
-impl<'r> Responder<'r> for SendFileAs
-{
-	fn respond_to(self, _request: &Request) -> Result<Response<'r>, Status>
-	{
-		let mut response = Response::new();
-		response.set_status(Status::new(200, "OK"));
-		response.set_header(Header::new("Content-Type", self.0));
-		response.set_sized_body(Cursor::new(self.1));
-		Ok(response)
-	}
-}
+use std::str::{FromStr, from_utf8};
 
 #[derive(Debug)]
 enum Error
 {
-	SceneNotFound
+	SceneNotFound,
+	InvalidOrigin,
+	InvalidDimensions,
 }
 
 impl<'r> Responder<'r> for Error
@@ -40,6 +32,22 @@ impl<'r> Responder<'r> for Error
 				let mut response = Response::new();
 				let body = "Scene not found\n".to_owned().into_bytes();
 				response.set_status(Status::new(404, "Not found"));
+				response.set_header(Header::new("Content-Type", "text/plain"));
+				response.set_sized_body(Cursor::new(body));
+				Ok(response)
+			},
+			Error::InvalidOrigin => {
+				let mut response = Response::new();
+				let body = "Invalid origin\n".to_owned().into_bytes();
+				response.set_status(Status::new(403, "Forbidden"));
+				response.set_header(Header::new("Content-Type", "text/plain"));
+				response.set_sized_body(Cursor::new(body));
+				Ok(response)
+			},
+			Error::InvalidDimensions => {
+				let mut response = Response::new();
+				let body = "Invalid origin\n".to_owned().into_bytes();
+				response.set_status(Status::new(418, "Invalid dimensions"));
 				response.set_header(Header::new("Content-Type", "text/plain"));
 				response.set_sized_body(Cursor::new(body));
 				Ok(response)
@@ -109,41 +117,329 @@ fn unpermute(s: &[u8]) -> i32
 	let r = r ^ random_f(0x00000 | l);
 	((l << 15) | r) as i32
 }
-/*
-fn main()
-{
-	for i in 0..(1<<30) {
-		let j = permute(i);
-		let k = unpermute(&j);
-		println!("\x1B[1A {} -> {} -> {}            ", i, from_utf8(&j).unwrap(), k);
-		
-		sleep(Duration::from_secs(1));
-	}
-}
-*/
 
 #[get("/scenes")]
-fn scenes_get() -> String
+fn scenes_get(auth: AuthenticationInfo) -> Result<SendFileAsWithCors, Error>
 {
-	let _conn = db_connect();
-	String::new()
+	let mut conn = db_connect();
+	let origin = auth.is_ok(&mut conn, false).map_err(|_|Error::InvalidOrigin)?;
+	let appid: i32 = conn.query("SELECT appid FROM applications WHERE origin=$1", &[&origin]).unwrap().iter().
+		next().unwrap().get(0);
+	let mut retval: Vec<(String, String)> = Vec::new();
+	for row in conn.query("SELECT application_scene.sceneid AS sceneid, scenes.name AS name FROM \
+		application_scene, scenes WHERE appid=$1 AND scenes.sceneid=application_scene.sceneid", &[&appid]).
+		unwrap().iter() {
+		let x = from_utf8(&permute(row.get(0))).unwrap().to_owned();
+		let y: String = row.get(1);
+		retval.push((x, y));
+	}
+	let mut out = String::new();
+	out.push_str(r#"{"#);
+	let mut first = true;
+	for i in retval.iter() {
+		if !first { out.push(','); }
+		write!(out, r#""{}":"{}""#, i.0, escape_json_string(&i.1)).unwrap();
+		first = false;
+	}
+	out.push_str(r#"}\n"#);
+	//Return with headers.
+	Ok(SendFileAsWithCors("application/json", out.into_bytes()))
 }
 
+struct GetBounds
+{
+	start: Option<i64>,
+	end: Option<i64>
+}
+
+impl<'a, 'r> FromRequest<'a, 'r> for GetBounds
+{
+	type Error = ();
+	fn from_request(request: &'a Request<'r>) -> Outcome<GetBounds, (Status, ()), ()> {
+		let h = request.headers();
+		let start = h.get_one("since").and_then(|x|i64::from_str(x).ok());
+		let end = h.get_one("until").and_then(|x|i64::from_str(x).ok());
+		Outcome::Success(GetBounds{start, end})
+	}
+}
+
+struct AuthenticationInfo
+{
+	origin: Option<String>,
+	overridden: bool,
+	key: Option<String>,
+}
+
+impl AuthenticationInfo
+{
+	fn is_ok(&self, conn: &mut Connection, privileged: bool) -> Result<String, ()>
+	{
+		let origin = self.origin.as_ref().ok_or(())?;
+		//If overridden is set, force privileged.
+		let privileged = privileged | self.overridden;
+		//If privileged is set, the apikey has to be set. This can login to any origin with.
+		//login set. Otherwise login is only allowed to those with login set and not temporary.
+		let matches: i32 = if privileged {
+			let apikey: String = self.key.as_ref().ok_or(())?.to_owned();
+			let origin = origin.to_owned();
+			conn.query("SELECT COUNT(*) FROM applications WHERE origin=$1 AND apikey=$2 AND \
+				login=true", &[&origin, &apikey]).unwrap().iter().next().unwrap().get(0)
+		} else {
+			let origin = origin.to_owned();
+			conn.query("SELECT COUNT(*) FROM applications WHERE origin=$1 AND temporary=false AND \
+				login=true", &[&origin]).unwrap().iter().next().unwrap().get(0)
+		};
+		if matches == 0 { return Err(()); }
+		if let Some(pos) = origin.find('#') {
+			Ok((&origin[..pos]).to_owned())
+		} else {
+			Ok(origin.to_owned())
+		}
+	}
+}
+
+impl<'a, 'r> FromRequest<'a, 'r> for AuthenticationInfo
+{
+	type Error = ();
+	fn from_request(request: &'a Request<'r>) -> Outcome<AuthenticationInfo, (Status, ()), ()> {
+		let h = request.headers();
+		let origin = h.get_one("origin").map(|x|x.to_owned());
+		let origin = origin.or_else(||h.get_one("api-origin").map(|x|x.to_owned()));
+		let key = h.get_one("api-key").map(|x|x.to_owned());
+		let overridden = h.contains("api-origin");
+		Outcome::Success(AuthenticationInfo{origin, overridden, key})
+	}
+}
+
+fn check_write_access(conn: &Connection, origin: &str, scene: i32) -> Result<(), ()>
+{
+	let origin = origin.to_owned();
+	let has_access: i32 = conn.query("SELECT COUNT(sceneid) FROM application_scene, applications WHERE \
+		origin=$1 AND sceneid=$2 AND application_scene.appid=applications.appid", &[&origin,&scene]).
+		unwrap().iter().next().unwrap().get(0);
+	if has_access > 0 { Ok(()) } else { Err(()) }
+}
+
+
+#[options("/scenes")]
+fn scenes_options() -> Result<SendFileAsWithCors, Error>
+{
+	Ok(SendFileAsWithCors("text/plain", Vec::new()))
+}
+
+#[derive(FromForm)]
+struct SceneInfo
+{
+	name: String,
+	width: u32,
+	height: u32,
+}
+
+#[post("/scenes", data = "<upload>")]
+fn scenes_post(auth: AuthenticationInfo, upload: Form<SceneInfo>) -> Result<SendFileAsWithCors, Error>
+{
+	let mut conn = db_connect();
+	let origin = auth.is_ok(&mut conn, true).map_err(|_|Error::InvalidOrigin)?;
+
+	let upload = upload.into_inner();
+	let name = upload.name;
+	let (w, h) = if upload.width > 0 && upload.height > 0 && upload.width < 1999999999 && upload.height < 1999999999 {
+		(upload.width as i32, upload.height as i32)
+	} else {
+		return Err(Error::InvalidDimensions);
+	};
+	let scene: i32 = conn.query("INSERT INTO scenes (name,width,height) VALUES ($1,$2,$3) RETURNING sceneid",
+		&[&name, &w, &h]).unwrap().iter().next().unwrap().get(0);
+	let appid: i32 = conn.query("SELECT appid FROM applications WHERE origin=$1", &[&origin]).unwrap().iter().
+		next().unwrap().get(0);
+	conn.execute("INSERT INTO application_scene (appid,sceneid) VALUES ($1,$2)", &[&appid, &scene]).unwrap();
+	let out = format!(r#"{{"scene":{}}}"#, from_utf8(&permute(scene)).unwrap());
+	Ok(SendFileAsWithCors("application/json", out.into_bytes()))
+}
+
+
+struct EventInfo
+{
+	ts: i64,
+	username: String,
+	color: i32,
+	x: i32,
+	y: i32,
+}
+
+impl EventInfo
+{
+	fn from_ei2(e: EventInfo2) -> EventInfo
+	{
+		EventInfo{ts:e.ts, username:e.u, color:e.c, x:e.x, y:e.y}
+	}
+}
+
+#[derive(FromForm)]
+struct EventInfo2
+{
+	ts: i64,
+	u: String,
+	c: i32,
+	x: i32,
+	y: i32,
+}
+
+
+#[options("/scenes/<scene>")]
+fn scene_options(scene: String) -> Result<SendFileAsWithCors, Error>
+{
+	let _ = scene;	//Shut up.
+	Ok(SendFileAsWithCors("text/plain", Vec::new()))
+}
+
+#[put("/scenes/<scene>", data = "<upload>")]
+fn scene_put(scene: String, auth: AuthenticationInfo, upload: Data) -> Result<SendFileAsWithCors, Error>
+{
+	let scene = unpermute(scene.as_bytes());
+	let mut conn = db_connect();
+
+	let origin = auth.is_ok(&mut conn, true).map_err(|_|Error::InvalidOrigin)?;
+	check_write_access(&mut conn, &origin, scene).map_err(|_|Error::InvalidOrigin)?;
+
+	let upload = upload.open();
+	let events: Vec<EventInfo> = Vec::new();
+	//FIXME: Parse input stream (which acts like Read) into Vector of EventInfo.
+	conn.execute("BEGIN TRANSACTION", &[]).unwrap();
+	for i in events.iter() {
+		conn.execute("INSERT INTO scene_data (sceneid,timestamp,username,color,x,y) VALUES ($1,$2,$3,$4,$5,$6) \
+			ON CONFLICT DO NOTHING", &[&scene, &i.ts, &i.username, &i.color, &i.x, &i.y]).unwrap();
+	}
+	conn.execute("COMMIT", &[]).unwrap();
+	//Ok.
+	Ok(SendFileAsWithCors("text/plain", Vec::new()))
+}
+
+
+#[post("/scenes/<scene>", data = "<upload>")]
+fn scene_post(scene: String, auth: AuthenticationInfo, upload: Form<EventInfo2>) -> Result<SendFileAsWithCors, Error>
+{
+	let scene = unpermute(scene.as_bytes());
+	let mut conn = db_connect();
+
+	let origin = auth.is_ok(&mut conn, true).map_err(|_|Error::InvalidOrigin)?;
+	check_write_access(&mut conn, &origin, scene).map_err(|_|Error::InvalidOrigin)?;
+
+	let ev = EventInfo::from_ei2(upload.into_inner());
+	conn.execute("INSERT INTO scene_data (sceneid,timestamp,username,color,x,y) VALUES ($1,$2,$3,$4,$5,$6) \
+		ON CONFLICT DO NOTHING", &[&scene, &ev.ts, &ev.username, &ev.color, &ev.x, &ev.y]).unwrap();
+	//Ok.
+	Ok(SendFileAsWithCors("text/plain", Vec::new()))
+}
+
+#[delete("/scenes/<scene>")]
+fn scene_delete(scene: String, auth: AuthenticationInfo) -> Result<SendFileAsWithCors, Error>
+{
+	let scene = unpermute(scene.as_bytes());
+	let mut conn = db_connect();
+
+	let origin = auth.is_ok(&mut conn, true).map_err(|_|Error::InvalidOrigin)?;
+	check_write_access(&mut conn, &origin, scene).map_err(|_|Error::InvalidOrigin)?;
+
+	if conn.execute("DELETE FROM scenes WHERE sceneid=$1", &[&scene]).unwrap() == 0 {
+		return Err(Error::SceneNotFound);
+	}
+	//Ok.
+	Ok(SendFileAsWithCors("text/plain", Vec::new()))
+}
+
+#[derive(Debug)]
+struct SendFileAsWithCors(&'static str, Vec<u8>);
+
+impl<'r> Responder<'r> for SendFileAsWithCors
+{
+	fn respond_to(self, request: &Request) -> Result<Response<'r>, Status>
+	{
+		let h = request.headers();
+		let origin = h.get_one("origin").map(|x|x.to_owned());
+
+		let mut response = Response::new();
+		response.set_status(Status::new(200, "OK"));
+		response.set_header(Header::new("Content-Type", self.0));
+		if let Some(origin) = origin {
+			response.set_header(Header::new("Content-Type", self.0));
+			response.set_header(Header::new("Access-Control-Allow-Origin", origin));
+			response.set_header(Header::new("Access-Control-Allow-Methods", "GET, PUT, POST, OPTIONS"));
+			response.set_header(Header::new("Access-Control-Allow-Headers", "api-origin, api-key, since, until, Content-Type"));
+		}
+		response.set_sized_body(Cursor::new(self.1));
+		Ok(response)
+	}
+}
+
+
+fn escape_json_string<'a>(x: &'a str) -> Cow<'a, str>
+{
+	if x.find(|c|{let c = c as u32; c < 32 || c == 34 || c == 92  /*controls, doublequote or backslash.*/}).
+		is_none() { return Cow::Borrowed(x); }
+	//Needs escaping.
+	let mut out = String::new();
+	for c in x.chars() {
+		let _c = c as u32;
+		match _c {
+			0...31 => out.push_str(&format!("\\u{:04x}", _c)),
+			34 => out.push_str("\\\""),
+			92 => out.push_str("\\\\"),
+			_ => out.push(c)
+		};
+	}
+	Cow::Owned(out)
+}
+
+fn format_row(target: &mut String, row: &EventInfo)
+{
+	let eusername = escape_json_string(&row.username);
+	write!(target, r#"{{"ts":{},"u":"{}","c":{},"x":{},"y":{}}}"#, row.ts, eusername, row.color,
+		row.x, row.y).unwrap();
+}
+
+
 #[get("/scenes/<scene>")]
-fn scene_get(scene: String) -> Result<String, Error>
+fn scene_get(scene: String, range: GetBounds) -> Result<SendFileAsWithCors, Error>
 {
 	let scene = unpermute(scene.as_bytes());
 	let conn = db_connect();
-	let (w, h) = if let Some(row) = conn.query("SELECT width, height FROM scenes WHERE sceneid=$1", &[&scene]).unwrap().iter().next() {
+	let (w, h) = if let Some(row) = conn.query("SELECT width, height FROM scenes WHERE sceneid=$1", &[&scene]).
+		unwrap().iter().next() {
 		let w: i32 = row.get(0);
 		let h: i32 = row.get(1);
 		(w, h)
 	} else {
 		return Err(Error::SceneNotFound);
 	};
-	Ok(format!("width: {}, height: {}\n", w, h))
+	let tstart = range.start.unwrap_or(i64::min_value());
+	let tend = range.end.unwrap_or(i64::max_value());
+	let mut retval = Vec::new();
+	for row in conn.query("SELECT timestamp,username,color,x,y FROM scene_data WHERE sceneid=$1 AND timestamp>=$2 \
+		AND timestamp <= $3 ORDER BY timestamp, recordid", &[&scene, &tstart, &tend]).unwrap().iter() {
+		retval.push(EventInfo {
+			ts: row.get(0),
+			username: row.get(1),
+			color: row.get(2),
+			x: row.get(3),
+			y: row.get(4),
+		});
+	}
+	let mut out = String::new();
+	out.push_str(r#"{"data":["#);
+	let mut first = true;
+	for i in retval.iter() {
+		if !first { out.push(','); }
+		format_row(&mut out, i);
+		first = false;
+	}
+	write!(out, r#"],"width":{},"height":{}}}\n"#, w, h).unwrap();
+	//Return with headers.
+	Ok(SendFileAsWithCors("application/json", out.into_bytes()))
 }
 
+
+/************************* LSMV EXPORT *****************************************************************************/
 fn write_byte(out: &mut Vec<u8>, b: u8)
 {
 	out.push(b);
@@ -260,6 +556,21 @@ fn write_lsmv_file(sceneid: &str, width: u16, height: u16, movie: &[MovieEvent])
 	out
 }
 
+#[derive(Debug)]
+struct SendFileAs(&'static str, Vec<u8>);
+
+impl<'r> Responder<'r> for SendFileAs
+{
+	fn respond_to(self, _request: &Request) -> Result<Response<'r>, Status>
+	{
+		let mut response = Response::new();
+		response.set_status(Status::new(200, "OK"));
+		response.set_header(Header::new("Content-Type", self.0));
+		response.set_sized_body(Cursor::new(self.1));
+		Ok(response)
+	}
+}
+
 #[get("/scenes/<scene>/lsmv")]
 fn scene_get_lsmv(scene: String) -> Result<SendFileAs, Error>
 {
@@ -301,8 +612,14 @@ fn hello(name: String, age: u8) -> String {
 fn main() {
 	rocket::ignite().mount("/test", routes![
 		//hello,
+		scene_options,
 		scene_get,
+		scene_put,
+		scene_post,
+		scene_delete,
 		scene_get_lsmv,
+		scenes_options,
 		scenes_get,
+		scenes_post,
 	]).launch();
 }
