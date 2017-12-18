@@ -71,21 +71,31 @@ def set_cors():
 		response.set_header("Access-Control-Allow-Methods", "GET, PUT, POST, OPTIONS");
 		response.set_header("Access-Control-Allow-Headers", "api-origin, api-key, since, until, Content-Type");
 
+def cleanup_origins():
+	fn = SQL("DELETE FROM applications WHERE temporary=true AND expires < $1");
+	fn(int(time.time()));
+
 def get_origin(require_authenticated):
 	origin = request.headers.get('api-origin');
 	if not origin:
 		origin = request.headers.get('origin');
 		if not origin:
 			return False;
+		#Only permanent origins are allowed.
+		sqlfunc = SQL('SELECT COUNT(*) FROM applications WHERE origin=$1 AND login=true AND temporary=false');
+		if int(sqlfunc(origin)[0][0]) < 1:
+			return False;
 		if not require_authenticated:
 			return origin;
 	apikey = request.headers.get('api-key');
 	if not apikey:
 		return False;
-	sqlfunc = SQL('SELECT origin FROM applications WHERE origin=$1 AND apikey=$2');
+	cleanup_origins();
+	sqlfunc = SQL('SELECT origin FROM applications WHERE origin=$1 AND apikey=$2 AND login=true');
 	res = sqlfunc(origin, apikey);
 	if len(res) > 0:
-		return origin;
+		parts = origin.rsplit('#', 1);
+		return parts[0] if len(parts) == 2 else origin;
 	return False;
 
 def auth_scene(scene, require_key):
@@ -107,7 +117,9 @@ def handle_scenes_get():
 	origin = get_origin(False);
 	if not origin:
 		response.status = 403;
-		return "&lt;&lt;no origin set&gt;&gt;";
+		response.content_type="text/plain";
+		set_cors();
+		return "<<no origin set>>\n";
 	sqlfunc = SQL('SELECT scenes.sceneid AS id, scenes.name AS name FROM applications, application_scene, scenes WHERE origin=$1 AND applications.appid=application_scene.appid AND application_scene.sceneid=scenes.sceneid');
 	res = sqlfunc(origin);
 	res2 = {};
@@ -366,8 +378,10 @@ def handle_scene_get_lsmv(scene):
 	sqlfunc = SQL('SELECT width, height FROM scenes WHERE sceneid=$1');
 	res = sqlfunc(scene);
 	if len(res) == 0:
-		response.status = 403;
-		return "&lt;&lt;not found&gt;&gt;";
+		response.status = 404;
+		response.content_type="text/plain";
+		set_cors();
+		return "<<not found>>\n";
 	width = int(res[0][0]);
 	height = int(res[0][1]);
 	sqlfunc = SQL('SELECT timestamp,username,color,x,y FROM scene_data WHERE sceneid=$1 ORDER BY timestamp, recordid');
@@ -382,8 +396,10 @@ def handle_scene_get_image(scene):
 	sqlfunc = SQL('SELECT width, height FROM scenes WHERE sceneid=$1');
 	res = sqlfunc(scene);
 	if len(res) == 0:
-		response.status = 403;
-		return "&lt;&lt;not found&gt;&gt;";
+		response.status = 404;
+		response.content_type="text/plain";
+		set_cors();
+		return "<<not found>>\n";
 	width = int(res[0][0]);
 	height = int(res[0][1]);
 	buffer = MappedImageState("currentstate/"+str(int(scene)), width, height);
