@@ -8,17 +8,20 @@ extern crate rand;
 use postgres::{Connection, TlsMode};
 use rocket::request::{FromRequest, FromForm, Form, FormItems, Request};
 use rocket::outcome::Outcome;
-use rocket::response::{Responder, Response};
-use rocket::http::{Header, Status};
+use rocket::response::{Responder, Response, NamedFile};
+use rocket::http::{Header, Status, ContentType};
 use rocket::Data;
 use std::borrow::Cow;
 use std::fmt::Write as FmtWrite;
 use std::io::Cursor;
+use std::ops::Deref;
 use std::str::{FromStr, from_utf8};
 use std::time::{SystemTime, UNIX_EPOCH};
 use rand::os::OsRng;
 use std::io::Read as IoRead;
 use std::char::from_u32;
+use std::path::{Path, PathBuf};
+use std::marker::PhantomData;
 use rand::Rng;
 
 #[derive(Debug)]
@@ -221,6 +224,53 @@ impl<'r> Responder<'r> for SendFileAsWithCors
 		Ok(response)
 	}
 }
+
+/************************* RAW FILE SERVING ************************************************************************/
+#[derive(Debug)]
+struct MoreContentTypeGuessing<'r,R:Responder<'r>>(R, PathBuf, PhantomData<&'r u8>);
+
+impl<'r,R:Responder<'r>> MoreContentTypeGuessing<'r,R>
+{
+	fn new(raw: R, path: PathBuf) -> MoreContentTypeGuessing<'r,R>
+	{
+		MoreContentTypeGuessing(raw, path, PhantomData)
+	}
+	fn guess_more(p: &Path) -> (&'static str, &'static str)
+	{
+		let ext = p.extension().map(|x|x.to_string_lossy()).unwrap_or(Cow::Borrowed(""));
+		let ext = ext.deref();
+		match ext {
+			"lsmv" => ("application", "x-lsnes-movie"),
+			"mkv" => ("application", "matroska"),
+			_ => ("application", "octet-stream")
+		}
+	}
+}
+
+impl<'r,R:Responder<'r>> Responder<'r> for MoreContentTypeGuessing<'r,R>
+{
+	fn respond_to(self, request: &Request) -> Result<Response<'r>, Status>
+	{
+		let ans = self.0.respond_to(request);
+		if let Ok(mut ans) = ans {
+			if ans.content_type().is_none() {
+				let (top, sub) = Self::guess_more(&self.1);
+				ans.set_header(ContentType::new(top, sub));
+			}
+			Ok(ans)
+		} else {
+			ans
+		}
+	}	
+}
+
+//Pathbuf as parameter does not accept path transversal.
+#[get("/static/<file..>")]
+fn serve_static_files(file: PathBuf) -> Option<MoreContentTypeGuessing<'static,NamedFile>> {
+	NamedFile::open(Path::new("/home/pbn/static/").join(&file)).ok().map(|f|MoreContentTypeGuessing::new(f,
+		file))
+}
+
 
 /************************* NAME PERMUTATION ************************************************************************/
 static SEED: &'static [u8] = b"9vk2VmEsHICVXQNMYHAOF7Fe6lzR7eMq";
@@ -1067,8 +1117,9 @@ fn hello(name: String, age: u8) -> String {
 }
 */
 fn main() {
-	rocket::ignite().mount("/pbn", routes![
+	rocket::ignite().mount("/", routes![
 		//hello,
+		serve_static_files,
 		scene_options,
 		scene_get,
 		scene_put,
