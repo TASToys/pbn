@@ -1,5 +1,5 @@
-use super::json_parse_numeric;
-use super::json_parse_string;
+use super::json::json_parse_numeric;
+use super::json::json_parse_string;
 use super::parse_event_stream;
 
 fn numeric_test_ok(input: &str)
