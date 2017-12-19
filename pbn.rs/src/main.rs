@@ -6,10 +6,11 @@ extern crate postgres;
 extern crate md5;
 extern crate rand;
 use postgres::{Connection, TlsMode};
-use rocket::request::{FromRequest, FromForm, Form, FormItems, Request};
+use rocket::request::{FromRequest, FromForm, FromSegments, Form, FormItems, Request};
 use rocket::outcome::Outcome;
 use rocket::response::{Responder, Response, NamedFile};
 use rocket::http::{Header, Status, ContentType};
+use rocket::http::uri::Segments;
 use rocket::Data;
 use std::borrow::Cow;
 use std::fmt::Write as FmtWrite;
@@ -196,13 +197,11 @@ fn parse_one_event<R:IoRead>(stream: &mut JsonStream<R>) -> Result<EventInfo, St
 	let mut x = None;
 	let mut y = None;
 	stream.do_object(|stream, key|{
-		let ntoken = stream.next(format!("Error reading JSON stream"))?;
-		let value = if let JsonToken::String(value) = ntoken {
-			value
-		} else if let JsonToken::Numeric(value) = ntoken {
-			value
-		} else {
-			return Err(format!("Expected number or string for value of event key '{}'", key));
+		let value = match stream.next(&|x|format!("Error reading Event: {}", x))? {
+			JsonToken::String(value) => value,
+			JsonToken::Numeric(value) => value,
+			x => return Err(format!("Expected number or string for value of event key '{}', got {:?}",
+				key, x))
 		};
 		if key == "ts" { ts = Some(value); }
 		else if key == "u" { username = Some(value); }
@@ -211,10 +210,10 @@ fn parse_one_event<R:IoRead>(stream: &mut JsonStream<R>) -> Result<EventInfo, St
 		else if key == "y" { y = Some(value); }
 		else { return Err(format!("Unrecognized event key '{}'", key)); }
 		Ok(())
-	}, format!("Error in Event object"))?;
+	}, &|x|format!("Error in Event object: {}", x))?;
 	match (ts, username, color, x, y) {
 		(Some(ts), Some(username), Some(color), Some(x), Some(y)) => Ok(EventInfo{
-			ts: i64::from_str(&ts).map_err(|_|format!("Bad event timestamp '{}'", ts))?,
+			ts: i64::from_str(&ts).map_err(|_|format!("Bad event ts '{}'", ts))?,
 			username: username,
 			color: checkpos(i32::from_str(&color), "c").map_err(|_|format!("Bad event c '{}'", color))?,
 			x: checkpos(i32::from_str(&x), "x").map_err(|_|format!("Bad event x '{}'", x))?,
@@ -224,32 +223,30 @@ fn parse_one_event<R:IoRead>(stream: &mut JsonStream<R>) -> Result<EventInfo, St
 	}
 }
 
-fn parse_event_stream<R:IoRead>(stream: &mut R) -> Result<Vec<EventInfo>, String>
+fn parse_event_stream<R:IoRead>(stream: &mut R, scene: Scene, conn: &mut Connection) -> Result<u64, String>
 {
-	let serr = format!("Error reading JSON stream");
-	let mut out = Vec::new();
+	let mut events = 0;
 	let mut stream = JsonStream::new(stream);
-	if stream.next(serr.clone())? != JsonToken::StartObject { return Err(format!("Expected start of events \
-		object")); }
-	if stream.next(serr.clone())? != JsonToken::String("data".to_owned()) { return Err(format!("Expected \
-		member 'data'")); }
-	if stream.next(serr.clone())? != JsonToken::DoubleColon { return Err(format!("Expected double \
-		colon")); }
-	if stream.next(serr.clone())? != JsonToken::StartArray { return Err(format!("Expected start of \
-		events array")); }
-	stream.do_array(|stream|{
-		let ntoken = stream.next(format!("Can't read start of event object"))?;
-		if ntoken == JsonToken::StartObject {
-			out.push(parse_one_event(stream)?);
+	stream.expect_object().map_err(|x|format!("Expecting start of events object: {}", x))?;
+	stream.do_object(|stream, key|{
+		if key.deref() == "data" {
+			stream.expect_array().map_err(|x|format!("Expected events->data to be an array: {}", x))?;
+			stream.do_array(|stream|{
+				stream.expect_object().map_err(|x|format!("Expecting start of event object: {}",
+					x))?;
+				let ev = parse_one_event(stream)?;
+				conn.execute("INSERT INTO scene_data (sceneid,timestamp,username,color,x,y) VALUES \
+					($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING", &[&scene, &ev.ts, &ev.username,
+					&ev.color, &ev.x, &ev.y]).unwrap();
+				events += 1;
+				Ok(())
+			}, &|x|format!("Error in events->data array: {}", x))
 		} else {
-			return Err(format!("Expected start of Event object"));
+			Err(format!("Unexpected field '{}' in events object", key))
 		}
-		Ok(())
-	}, format!("Error in events array"))?;
-	if stream.next(serr.clone())? != JsonToken::EndObject { return Err(format!("Expected end of \
-		events object")); }
-	if stream.next(serr.clone())? != JsonToken::None { return Err(format!("Expected end of JSON")); }
-	Ok(out)
+	}, &|x|format!("Error in events object: {}", x))?;
+	stream.expect_end_of_json().map_err(|x|format!("Expected end of JSON: {}", x))?;
+	Ok(events)
 }
 
 #[put("/scenes/<scene>", data = "<upload>")]
@@ -257,26 +254,19 @@ fn scene_put(scene: Scene, auth: AuthenticationInfo, upload: Data) -> Result<Sen
 {
 	let mut conn = db_connect();
 
-	auth.check_write(&mut conn, scene).map_err(|_|Error::InvalidOrigin)?;
+	match auth.check_write(&mut conn, scene) { Ok(_) => (), Err(_) => {
+		return Err(sink_put(upload, Error::InvalidOrigin));	//Don't barf.
+	}};
 
-	let mut upload = upload.open();
-	let events: Vec<EventInfo> = match parse_event_stream(&mut upload).map_err(|x|Error::BadEventStream(x)) {
-		Ok(x) => x,
-		Err(x) => {
-			//Read the event stream to the end to avoid Rocket barfing.
-			let mut buf = [0;4096];
-			while upload.read(&mut buf).unwrap() > 0 {}
-			return Err(x);
-		}
-	};
 	conn.execute("BEGIN TRANSACTION", &[]).unwrap();
-	for i in events.iter() {
-		conn.execute("INSERT INTO scene_data (sceneid,timestamp,username,color,x,y) VALUES ($1,$2,$3,$4,$5,$6) \
-			ON CONFLICT DO NOTHING", &[&scene, &i.ts, &i.username, &i.color, &i.x, &i.y]).unwrap();
-	}
+	let mut upload = upload.open();
+	let events = match parse_event_stream(&mut upload, scene, &mut conn).map_err(|x|Error::BadEventStream(x)) {
+		Ok(x) => x,
+		Err(x) => return Err(sink_put_remaining(upload, x))
+	};
 	conn.execute("COMMIT", &[]).unwrap();
 	//Ok.
-	Ok(SendFileAsWithCors("text/plain", Vec::new()))
+	Ok(SendFileAsWithCors("text/plain", format!("Wrote {} event(s)\n", events).into_bytes()))
 }
 
 /************************* OPTIONS SCENE ***************************************************************************/
@@ -375,7 +365,7 @@ fn scene_post(scene: Scene, auth: AuthenticationInfo, upload: Form<ScenePostForm
 		}
 	}
 	//Ok.
-	Ok(SendFileAsWithCors("text/plain", Vec::new()))
+	Ok(SendFileAsWithCors("text/plain", format!("Wrote an event\n").into_bytes()))
 }
 
 /************************* DELETE SCENE ****************************************************************************/
@@ -390,7 +380,7 @@ fn scene_delete(scene: Scene, auth: AuthenticationInfo) -> Result<SendFileAsWith
 		return Err(Error::SceneNotFound);
 	}
 	//Ok.
-	Ok(SendFileAsWithCors("text/plain", Vec::new()))
+	Ok(SendFileAsWithCors("text/plain", format!("Deleted a scene\n").into_bytes()))
 }
 
 
@@ -466,6 +456,55 @@ fn scene_get_lsmv(scene: Scene) -> Result<SendFileAs, Error>
 	_scene_get_lsmv(scene)
 }
 
+/************************* PUT FALLBACK *****************************************************************************/
+fn sink_put_remaining<R:IoRead,T:Sized>(mut stream: R, error: T) -> T
+{
+	//Read the event stream to the end to avoid Rocket barfing.
+	let mut buf = [0;4096];
+	while stream.read(&mut buf).unwrap() > 0 {}
+	error
+}
+
+fn sink_put<T:Sized>(upload: Data, error: T) -> T
+{
+	sink_put_remaining(upload.open(), error)
+}
+
+struct AnySegments;
+
+impl<'a> FromSegments<'a> for AnySegments
+{
+	type Error = ();
+	fn from_segments(_: Segments<'a>) -> Result<Self, Self::Error>
+	{
+		//Always trivially succeeds.
+		Ok(AnySegments)
+	}
+}
+
+//These routes act as catch-all for requests. This is mainly to sink failing PUT requests, as those would cause
+//rocket to barf. 998 and 999 is very low priority.
+#[put("/scenes/<_x..>", data = "<upload>", rank = 998)]
+fn put_scene_fallback(_x: AnySegments, upload: Data) -> Error { sink_put(upload, Error::SceneNotFound) }
+#[post("/scenes/<_x..>", data = "<upload>", rank = 998)]
+fn post_scene_fallback(_x: AnySegments, upload: Data) -> Error { sink_put(upload, Error::SceneNotFound) }
+#[delete("/scenes/<_x..>", data = "<upload>", rank = 998)]
+fn delete_scene_fallback(_x: AnySegments, upload: Data) -> Error { sink_put(upload, Error::SceneNotFound) }
+#[get("/scenes/<_x..>", rank = 998)]
+fn get_scene_fallback(_x: AnySegments) -> Error { Error::SceneNotFound }
+#[options("/scenes/<_x..>", rank = 998)]
+fn options_scene_fallback(_x: AnySegments) -> Error { Error::SceneNotFound }
+#[put("/<_x..>", data = "<upload>", rank = 999)]
+fn put_fallback(_x: AnySegments, upload: Data) -> Error { sink_put(upload, Error::MethodNotSupported) }
+#[post("/<_x..>", data = "<upload>", rank = 999)]
+fn post_fallback(_x: AnySegments, upload: Data) -> Error { sink_put(upload, Error::MethodNotSupported) }
+#[delete("/<_x..>", data = "<upload>", rank = 999)]
+fn delete_fallback(_x: AnySegments, upload: Data) -> Error { sink_put(upload, Error::MethodNotSupported) }
+#[get("/<_x..>", rank = 999)]
+fn get_fallback(_x: AnySegments) -> Error { Error::NotFound }
+#[options("/<_x..>", rank = 999)]
+fn options_fallback(_x: AnySegments) -> Error { Error::NotFound }
+
 fn main() {
 	rocket::ignite().mount("/", routes![
 		//hello,
@@ -479,8 +518,22 @@ fn main() {
 		scenes_options,
 		scenes_get,
 		scenes_post,
+		//Scene Fallbacks.
+		put_scene_fallback,
+		post_scene_fallback,
+		delete_scene_fallback,
+		get_scene_fallback,
+		options_scene_fallback,
+		//Global Fallbacks.
+		put_fallback,
+		post_fallback,
+		delete_fallback,
+		get_fallback,
+		options_fallback,
 	]).launch();
 }
 
+
 #[cfg(test)]
 mod tests;
+

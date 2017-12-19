@@ -12,62 +12,44 @@ pub enum Error
 	BadFormField(String),
 	BadGrant,
 	BadEventStream(String),
+	MethodNotSupported,
+	NotFound,
+}
+
+trait StringTrait { fn get(self) -> String; }
+impl<'a> StringTrait for &'a str { fn get(self) -> String { self.to_owned() } }
+impl<'a> StringTrait for String { fn get(self) -> String { self } }
+
+fn make_response<B:StringTrait>(response: &mut Response, code: u16, statstr: &'static str, body: B)
+{
+	let body = body.get().into_bytes();
+	response.set_status(Status::new(code, statstr));
+	response.set_header(Header::new("Content-Type", "text/plain"));
+	response.set_sized_body(Cursor::new(body));
 }
 
 impl<'r> Responder<'r> for Error
 {
 	fn respond_to(self, _request: &Request) -> Result<Response<'r>, Status>
 	{
+		let mut response = Response::new();
 		match self {
-			Error::SceneNotFound => {
-				let mut response = Response::new();
-				let body = "Scene not found\n".to_owned().into_bytes();
-				response.set_status(Status::new(404, "Not found"));
-				response.set_header(Header::new("Content-Type", "text/plain"));
-				response.set_sized_body(Cursor::new(body));
-				Ok(response)
-			},
-			Error::InvalidOrigin => {
-				let mut response = Response::new();
-				let body = "Invalid origin\n".to_owned().into_bytes();
-				response.set_status(Status::new(403, "Forbidden"));
-				response.set_header(Header::new("Content-Type", "text/plain"));
-				response.set_sized_body(Cursor::new(body));
-				Ok(response)
-			},
-			Error::InvalidDimensions => {
-				let mut response = Response::new();
-				let body = "Invalid dimensions\n".to_owned().into_bytes();
-				response.set_status(Status::new(422, "Invalid dimensions"));
-				response.set_header(Header::new("Content-Type", "text/plain"));
-				response.set_sized_body(Cursor::new(body));
-				Ok(response)
-			},
-			Error::BadFormField(f) => {
-				let mut response = Response::new();
-				let body = format!("Bad form field {}\n", f).into_bytes();
-				response.set_status(Status::new(422, "Bad form field"));
-				response.set_header(Header::new("Content-Type", "text/plain"));
-				response.set_sized_body(Cursor::new(body));
-				Ok(response)
-			},
-			Error::BadGrant => {
-				let mut response = Response::new();
-				let body = "Bad grant\n".to_owned().into_bytes();
-				response.set_status(Status::new(422, "Bad grant"));
-				response.set_header(Header::new("Content-Type", "text/plain"));
-				response.set_sized_body(Cursor::new(body));
-				Ok(response)
-			},
-			Error::BadEventStream(f) => {
-				let mut response = Response::new();
-				let body = format!("Bad event stream {}\n", f).into_bytes();
-				response.set_status(Status::new(422, "Bad event stream"));
-				response.set_header(Header::new("Content-Type", "text/plain"));
-				response.set_sized_body(Cursor::new(body));
-				Ok(response)
-			},
+			Error::SceneNotFound => make_response(&mut response, 404, "Scene not found",
+				"Scene not found\n"),
+			Error::NotFound => make_response(&mut response, 404, "Not found",
+				"Not found\n"),
+			Error::MethodNotSupported => make_response(&mut response, 405, "Method not supported",
+				"Method not supported\n"),
+			Error::InvalidOrigin => make_response(&mut response, 403, "Forbidden", "Invalid origin\n"),
+			Error::InvalidDimensions => make_response(&mut response, 422, "Invalid dimensions",
+				"Invalid dimensions\n"),
+			Error::BadFormField(f) => make_response(&mut response, 422, "Bad form field", format!(
+				"Bad form field: {}\n", f)),
+			Error::BadGrant => make_response(&mut response, 422, "Bad grant", "Bad grant\n"),
+			Error::BadEventStream(f) => make_response(&mut response, 422, "Bad event stream", format!(
+				"Bad event stream {}\n", f)),
 		}
+		Ok(response)
 	}
 }
 
