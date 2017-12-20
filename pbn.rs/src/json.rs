@@ -64,73 +64,133 @@ fn is_ws_byte(x: u8) -> bool
 	x == 9 || x== 10 || x == 13 || x == 32
 }
 
+const CLASSIFY_NUMERIC: u32 = 1;
+const CLASSIFY_ZERO: u32 = 2;
+const CLASSIFY_NONZERO: u32 = 4;
+const CLASSIFY_MINUS: u32 = 8;
+const CLASSIFY_MINUSPLUS: u32 = 16;
+const CLASSIFY_DECIMAL: u32 = 32;
+const CLASSIFY_EXPONENT: u32 = 64;
+
+fn nclassify(x: char) -> u32
+{
+	match x as u32 {
+		43 => CLASSIFY_MINUSPLUS,
+		45 => CLASSIFY_MINUS | CLASSIFY_MINUSPLUS,
+		46 => CLASSIFY_DECIMAL,
+		48 => CLASSIFY_NUMERIC | CLASSIFY_ZERO,
+		49...57 => CLASSIFY_NUMERIC | CLASSIFY_NONZERO,
+		69 => CLASSIFY_EXPONENT,
+		101 => CLASSIFY_EXPONENT,
+		_ => 0,
+	}
+}
+
 fn json_parse_numeric(x: &str, end: bool) -> Result<(usize, String), String>
 {
+	const STATE_INIT: u32 = 0;	//Initial.
+	const STATE_FNUM: u32 = 1;	//First number.
+	const STATE_CNUM: u32 = 2;	//Main number continuation
+	const STATE_ZERO: u32 = 3;	//Main number is zero.
+	const STATE_FDEC: u32 = 4;	//First in decimal part.
+	const STATE_CDEC: u32 = 5;	//Continue decimal part.
+	const STATE_EXPN: u32 = 6;	//After exponent separator.
+	const STATE_EXPS: u32 = 7;	//After exponent numerical sign.
+	const STATE_EXPC: u32 = 8;	//After exponent numerical continuation.
+	const STATE_FINI: u32 = 99;	//Finished.
+	const STATE_FAIL: u32 = 98;	//Failed.
+	//Fastpath parse. The number can end in whitespace, comma, and close bracket and curly paren.
+	if let Some(end) = x.find(|x|x == '\t' || x == '\r' || x == '\n' || x == ' ' || x == ',' || x == ']'
+		|| x == '}') {
+		let x = &x[..end];
+		let mut state = STATE_INIT;
+		for i in x.chars() {
+			let c = nclassify(i);
+			state = match state {
+				STATE_INIT if c & CLASSIFY_MINUS != 0 => STATE_FNUM,
+				STATE_INIT if c & CLASSIFY_ZERO != 0 => STATE_ZERO,
+				STATE_INIT if c & CLASSIFY_NONZERO != 0 => STATE_CNUM,
+				STATE_FNUM if c & CLASSIFY_ZERO != 0 => STATE_ZERO,
+				STATE_FNUM if c & CLASSIFY_NONZERO != 0 => STATE_CNUM,
+				STATE_CNUM if c & CLASSIFY_DECIMAL != 0 => STATE_FDEC,
+				STATE_CNUM if c & CLASSIFY_EXPONENT != 0 => STATE_EXPN,
+				STATE_CNUM if c & CLASSIFY_NUMERIC != 0 => STATE_CNUM,
+				STATE_ZERO if c & CLASSIFY_DECIMAL != 0 => STATE_FDEC,
+				STATE_ZERO if c & CLASSIFY_EXPONENT != 0 => STATE_EXPN,
+				STATE_FDEC if c & CLASSIFY_NUMERIC != 0 => STATE_CDEC,
+				STATE_CDEC if c & CLASSIFY_EXPONENT != 0 => STATE_EXPN,
+				STATE_CDEC if c & CLASSIFY_NUMERIC != 0 => STATE_CDEC,
+				STATE_EXPN if c & CLASSIFY_MINUSPLUS != 0 => STATE_EXPS,
+				STATE_EXPN if c & CLASSIFY_NUMERIC != 0 => STATE_EXPC,
+				STATE_EXPS if c & CLASSIFY_NUMERIC != 0 => STATE_EXPC,
+				STATE_EXPC if c & CLASSIFY_NUMERIC != 0 => STATE_EXPC,
+				_ => STATE_FAIL
+			};
+		}
+		//Check suitable last state.
+		match state {
+			STATE_CNUM|STATE_ZERO|STATE_CDEC|STATE_EXPC => return Ok((x.len(), x.to_owned())),
+			_ => (),	//Failed.
+		}
+	}
+	//Fastpath failed, do slowpath.
 	let mut y = String::new();
 	let mut state = 0;
 	for i in x.chars() {
 		let _i = i as i32;
 		state = match state {
-			//State 0: Perhaps minus, or the first number.
-			0 if i == '-' => 1,
-			0 if i == '0' => 3,
-			0 if _i >= 49 && _i <= 57 => 2,
-			0 => return Err(format!("Got '{}' for sign or first number", i)),
-			//State 1: First number.
-			1 if i == '0' => 3,
-			1 if _i >= 49 && _i <= 57 => 2,
-			1 => return Err(format!("Got '{}' for first number", i)),
-			//State 2: Numeric part.
-			2 if i == '.' => 4,
-			2 if i == 'e' => 6,
-			2 if i == 'E' => 6,
-			2 if _i >= 48 && _i <= 57 => 2,
-			2 => 99,
-			//State 3: After zero.
-			3 if i == '.' => 4,
-			3 if i == 'e' => 6,
-			3 if i == 'E' => 6,
-			3 if _i >= 48 && _i <= 57 => return Err(format!("Got '{}' for after zero", i)),
-			3 => 99,
-			//State 4: Decimal part.
-			4 if _i >= 48 && _i <= 57 => 5,
-			4 => return Err(format!("Got '{}' for after decimal dot", i)),
-			//State 5: Decimal part, at least one digit.
-			5 if _i >= 48 && _i <= 57 => 5,
-			5 if i == 'e' => 6,
-			5 if i == 'E' => 6,
-			5 => 99,
-			//State 6: After exponent sign
-			6 if _i >= 48 && _i <= 57 => 8,
-			6 if i == '+' => 7,
-			6 if i == '-' => 7,
-			6 => return Err(format!("Got '{}' for after exponent", i)),
-			//State 7: After exponent sign and numeric sign
-			7 if _i >= 48 && _i <= 57 => 8,
-			7 => return Err(format!("Got '{}' for after exponent sign", i)),
+			STATE_INIT if i == '-' => STATE_FNUM,
+			STATE_INIT if i == '0' => STATE_ZERO,
+			STATE_INIT if _i >= 49 && _i <= 57 => STATE_CNUM,
+			STATE_INIT => return Err(format!("Got '{}' for sign or first number", i)),
+			STATE_FNUM if i == '0' => STATE_ZERO,
+			STATE_FNUM if _i >= 49 && _i <= 57 => STATE_CNUM,
+			STATE_FNUM => return Err(format!("Got '{}' for first number", i)),
+			STATE_CNUM if i == '.' => STATE_FDEC,
+			STATE_CNUM if i == 'e' => STATE_EXPN,
+			STATE_CNUM if i == 'E' => STATE_EXPN,
+			STATE_CNUM if _i >= 48 && _i <= 57 => STATE_CNUM,
+			STATE_CNUM => STATE_FINI,
+			STATE_ZERO if i == '.' => STATE_FDEC,
+			STATE_ZERO if i == 'e' => STATE_EXPN,
+			STATE_ZERO if i == 'E' => STATE_EXPN,
+			STATE_ZERO if _i >= 48 && _i <= 57 => return Err(format!("Got '{}' for after zero", i)),
+			STATE_ZERO => STATE_FINI,
+			STATE_FDEC if _i >= 48 && _i <= 57 => STATE_CDEC,
+			STATE_FDEC => return Err(format!("Got '{}' for after decimal dot", i)),
+			STATE_CDEC if _i >= 48 && _i <= 57 => STATE_CDEC,
+			STATE_CDEC if i == 'e' => STATE_EXPN,
+			STATE_CDEC if i == 'E' => STATE_EXPN,
+			STATE_CDEC => STATE_FINI,
+			STATE_EXPN if _i >= 48 && _i <= 57 => STATE_EXPC,
+			STATE_EXPN if i == '+' => STATE_EXPS,
+			STATE_EXPN if i == '-' => STATE_EXPS,
+			STATE_EXPN => return Err(format!("Got '{}' for after exponent", i)),
+			STATE_EXPS if _i >= 48 && _i <= 57 => STATE_EXPC,
+			STATE_EXPS => return Err(format!("Got '{}' for after exponent sign", i)),
 			//State 8: Number in exponent.
-			8 if _i >= 48 && _i <= 57 => 8,
-			8 => 99,
+			STATE_EXPC if _i >= 48 && _i <= 57 => 8,
+			STATE_EXPC => STATE_FINI,
 			x => return Err(format!("Where am I (state={})???", x)),
 		};
-		if state != 99 {
+		if state != STATE_FINI {
 			y.push(i);
 		} else {
 			return Ok((y.len(), y));
 		}
 	}
 	match state {
-		2|3|5|8 if end => Ok((y.len(), y)),
+		STATE_CNUM|STATE_ZERO|STATE_CDEC|STATE_EXPC if end => Ok((y.len(), y)),
 		_ if !end => Err(format!("Numeric token too long")),
-		0 => Err(format!("Got EoF expecting sign or first number")),
-		1 => Err(format!("Got EoF expecting first number")),
-		2 => Err(format!("Got EoF expecting numeric part")),
-		3 => Err(format!("Got EoF expecting after zero")),
-		4 => Err(format!("Got EoF expecting after decimal dot")),
-		5 => Err(format!("Got EoF expecting decimal part")),
-		6 => Err(format!("Got EoF expecting after exponent")),
-		7 => Err(format!("Got EoF expecting after sign")),
-		8 => Err(format!("Got EoF expecting after number in exponent")),
+		STATE_INIT => Err(format!("Got EoF expecting sign or first number")),
+		STATE_FNUM => Err(format!("Got EoF expecting first number")),
+		STATE_CNUM => Err(format!("Got EoF expecting numeric part")),
+		STATE_ZERO => Err(format!("Got EoF expecting after zero")),
+		STATE_FDEC => Err(format!("Got EoF expecting after decimal dot")),
+		STATE_CDEC => Err(format!("Got EoF expecting decimal part")),
+		STATE_EXPN => Err(format!("Got EoF expecting after exponent")),
+		STATE_EXPS => Err(format!("Got EoF expecting after sign")),
+		STATE_EXPC => Err(format!("Got EoF expecting after number in exponent")),
 		x => Err(format!("Where am I (state={})???", x))
 	}
 }
@@ -148,6 +208,18 @@ fn hexparse(i: char) -> u32
 
 fn json_parse_string(x: &str, end: bool) -> Result<(usize, String), String>
 {
+	//Fastpath parse. This succeeds if first character is doublequote, and out of doublequote and backslash,
+	//doublequote comes first.
+	if x.len() > 2 && x.as_bytes()[0] == 34 {
+		let x = &x[1..];
+		if let Some(end) = x.find(|x|x == '\"' || x == '\\') {
+			if x.as_bytes()[end] == 34 {
+				//Fastpath succeeded.
+				return Ok((end+2, (&x[..end]).to_owned()));
+			}
+		}
+	}
+	//Fastpath failed, use slowpath.
 	let mut y = String::new();
 	let mut state = 0;
 	let mut unicode: u32 = 0;
@@ -343,6 +415,7 @@ pub struct JsonStream<R:IoRead>
 	reader: R,
 	buffer: String,
 	utf8_overflow: u32,
+	start: usize,
 	eof: bool,
 }
 
@@ -350,11 +423,15 @@ impl<R:IoRead> JsonStream<R>
 {
 	pub fn new(reader: R) -> JsonStream<R>
 	{
-		JsonStream{reader: reader, buffer: String::new(), utf8_overflow: 0, eof: false}
+		JsonStream{reader: reader, buffer: String::new(), utf8_overflow: 0, start: 0, eof: false}
 	}
 	fn refill(&mut self) -> Result<(), BasicJsonError>
 	{
-		while !self.eof && self.buffer.len() < 4096 {
+		while !self.eof && self.buffer.len() - self.start < 4096 {
+			if self.start > 0 {
+				self.buffer = (&self.buffer[self.start..]).to_owned();
+				self.start = 0;
+			}
 			let mut buf = [0;8192];
 			let n = self.reader.read(&mut buf).map_err(|x|BasicJsonError::IoError(format!("{}", x)))?;
 			if n == 0 {
@@ -420,15 +497,16 @@ impl<R:IoRead> JsonStream<R>
 		-> E
 	{
 		self.refill().map_err(error)?;
-		let (n, t) = JsonToken::next(&self.buffer, self.eof).map_err(|x|error(
+		let (n, t) = JsonToken::next(&self.buffer[self.start..], self.eof).map_err(|x|error(
 			BasicJsonError::BadJsonToken(x)))?;
-		self.buffer = (&self.buffer[n..]).to_owned();
+		self.start += n;
 		Ok(t)
 	}
 	pub fn peek(&mut self) -> Result<JsonToken, BasicJsonError>
 	{
 		self.refill()?;
-		JsonToken::next(&self.buffer, self.eof).map(|(_,x)|x).map_err(|x|BasicJsonError::BadJsonToken(x))
+		JsonToken::next(&self.buffer[self.start..], self.eof).map(|(_,x)|x).map_err(|x|
+			BasicJsonError::BadJsonToken(x))
 	}
 	pub fn do_array<F,E:Clone,ErrFn>(&mut self, mut cb: F, error: &ErrFn) -> Result<(), E> where F: FnMut(
 		&mut JsonStream<R>) -> Result<(), E>, ErrFn: Fn(BasicJsonError) -> E

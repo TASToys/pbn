@@ -6,6 +6,7 @@ extern crate postgres;
 extern crate md5;
 extern crate rand;
 use postgres::{Connection, TlsMode};
+use postgres::stmt::Statement;
 use rocket::request::{FromRequest, FromForm, FromSegments, Form, FormItems, Request};
 use rocket::outcome::Outcome;
 use rocket::response::{Responder, Response, NamedFile};
@@ -223,7 +224,7 @@ fn parse_one_event<R:IoRead>(stream: &mut JsonStream<R>) -> Result<EventInfo, St
 	}
 }
 
-fn parse_event_stream<R:IoRead>(stream: &mut R, scene: Scene, conn: &mut Connection) -> Result<u64, String>
+fn parse_event_stream<R:IoRead>(stream: &mut R, scene: Scene, stmt: &Statement) -> Result<u64, String>
 {
 	let mut events = 0;
 	let mut stream = JsonStream::new(stream);
@@ -235,9 +236,7 @@ fn parse_event_stream<R:IoRead>(stream: &mut R, scene: Scene, conn: &mut Connect
 				stream.expect_object().map_err(|x|format!("Expecting start of event object: {}",
 					x))?;
 				let ev = parse_one_event(stream)?;
-				conn.execute("INSERT INTO scene_data (sceneid,timestamp,username,color,x,y) VALUES \
-					($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING", &[&scene, &ev.ts, &ev.username,
-					&ev.color, &ev.x, &ev.y]).unwrap();
+				stmt.execute(&[&scene, &ev.ts, &ev.username, &ev.color, &ev.x, &ev.y]).unwrap();
 				events += 1;
 				Ok(())
 			}, &|x|format!("Error in events->data array: {}", x))
@@ -258,9 +257,12 @@ fn scene_put(scene: Scene, auth: AuthenticationInfo, upload: Data) -> Result<Sen
 		return Err(sink_put(upload, Error::InvalidOrigin));	//Don't barf.
 	}};
 
+	//Use prepared statement to improve performance.
+	let stmt = conn.prepare("INSERT INTO scene_data (sceneid,timestamp,username,color,x,y) VALUES \
+		($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING").unwrap();
 	conn.execute("BEGIN TRANSACTION", &[]).unwrap();
 	let mut upload = upload.open();
-	let events = match parse_event_stream(&mut upload, scene, &mut conn).map_err(|x|Error::BadEventStream(x)) {
+	let events = match parse_event_stream(&mut upload, scene, &stmt).map_err(|x|Error::BadEventStream(x)) {
 		Ok(x) => x,
 		Err(x) => return Err(sink_put_remaining(upload, x))
 	};
