@@ -279,7 +279,7 @@ fn json_parse_string(x: &str, end: bool) -> Result<(usize, String), String>
 						surrogate"));
 				} else if unicode >= 0xDC00 && unicode <= 0xDFFF {
 					unicode = 0x10000 + pending * 1024 + (unicode - 0xDC00);
-					//This should produce at most 10FFFF.
+					//This should produce at least 10000 and at most 10FFFF.
 					y.push(from_u32(unicode).unwrap());
 					1
 				} else {

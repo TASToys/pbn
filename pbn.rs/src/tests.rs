@@ -1,3 +1,32 @@
+
+use super::parse_event_stream;
+extern crate test;
+use self::test::Bencher;
+use self::test::black_box;
+
+#[bench]
+fn test_json_parse_elvxes(b: &mut Bencher)
+{
+	let data = include_bytes!("/home/pbn/ELVXES.json");
+	let data = &data[..];
+	b.iter(||{
+		let mut strm = data;
+		black_box(parse_event_stream(&mut strm, &|ev|{black_box(ev);})).ok();
+	});
+}
+
+#[bench]
+fn test_json_parse_large(b: &mut Bencher)
+{
+	let data = include_bytes!("/home/pbn/test20.json");
+	let data = &data[..];
+	b.iter(||{
+		let mut strm = data;
+		black_box(parse_event_stream(&mut strm, &|ev|{black_box(ev);})).ok();
+	});
+}
+
+/*
 use super::json::json_parse_numeric;
 use super::json::json_parse_string;
 use super::parse_event_stream;
@@ -201,3 +230,4 @@ fn parse_event_streams_invalid()
 	let stream = br#"{"data":[{"ts":2,"u":"foo","c":5,"x":4,"y":8}]"#;
 	let mut stream = &stream[..]; assert!(parse_event_stream(&mut stream).is_err());
 }
+*/

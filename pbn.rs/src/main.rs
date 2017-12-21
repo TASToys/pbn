@@ -1,4 +1,4 @@
-#![feature(plugin, decl_macro, custom_derive)]
+#![feature(plugin, decl_macro, custom_derive, test)]
 #![plugin(rocket_codegen)]
 
 extern crate rocket;
@@ -6,7 +6,6 @@ extern crate postgres;
 extern crate md5;
 extern crate rand;
 use postgres::{Connection, TlsMode};
-use postgres::stmt::Statement;
 use rocket::request::{FromRequest, FromForm, FromSegments, Form, FormItems, Request};
 use rocket::outcome::Outcome;
 use rocket::response::{Responder, Response, NamedFile};
@@ -224,7 +223,7 @@ fn parse_one_event<R:IoRead>(stream: &mut JsonStream<R>) -> Result<EventInfo, St
 	}
 }
 
-fn parse_event_stream<R:IoRead>(stream: &mut R, scene: Scene, stmt: &Statement) -> Result<u64, String>
+fn parse_event_stream<R:IoRead,F>(stream: &mut R, sink: &F) -> Result<u64, String> where F: Fn(EventInfo)
 {
 	let mut events = 0;
 	let mut stream = JsonStream::new(stream);
@@ -236,7 +235,7 @@ fn parse_event_stream<R:IoRead>(stream: &mut R, scene: Scene, stmt: &Statement) 
 				stream.expect_object().map_err(|x|format!("Expecting start of event object: {}",
 					x))?;
 				let ev = parse_one_event(stream)?;
-				stmt.execute(&[&scene, &ev.ts, &ev.username, &ev.color, &ev.x, &ev.y]).unwrap();
+				sink(ev);
 				events += 1;
 				Ok(())
 			}, &|x|format!("Error in events->data array: {}", x))
@@ -262,7 +261,8 @@ fn scene_put(scene: Scene, auth: AuthenticationInfo, upload: Data) -> Result<Sen
 		($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING").unwrap();
 	conn.execute("BEGIN TRANSACTION", &[]).unwrap();
 	let mut upload = upload.open();
-	let events = match parse_event_stream(&mut upload, scene, &stmt).map_err(|x|Error::BadEventStream(x)) {
+	let events = match parse_event_stream(&mut upload, &|ev|{stmt.execute(&[&scene, &ev.ts,
+		&ev.username, &ev.color, &ev.x, &ev.y]).unwrap();}).map_err(|x|Error::BadEventStream(x)) {
 		Ok(x) => x,
 		Err(x) => return Err(sink_put_remaining(upload, x))
 	};
@@ -538,4 +538,3 @@ fn main() {
 
 #[cfg(test)]
 mod tests;
-
