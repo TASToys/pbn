@@ -71,6 +71,10 @@ impl Scene
 	{
 		permute(self.0)
 	}
+	pub fn as_inner(&self) -> i32
+	{
+		self.0
+	}
 }
 
 impl<'a> FromParam<'a> for Scene

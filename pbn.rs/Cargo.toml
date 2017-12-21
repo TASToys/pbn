@@ -9,6 +9,7 @@ rocket_codegen = { git = "https://github.com/SergioBenitez/Rocket" }
 postgres = "0.15"
 md5 = "0.3.6"
 rand = "0.3.18"
+libc = "0.2"
 
 [profile.release]
 debug=true

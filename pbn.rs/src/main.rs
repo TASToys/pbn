@@ -1,10 +1,12 @@
 #![feature(plugin, decl_macro, custom_derive, test)]
 #![plugin(rocket_codegen)]
+#![deny(unsafe_code)]
 
 extern crate rocket;
 extern crate postgres;
 extern crate md5;
 extern crate rand;
+extern crate libc;
 use postgres::{Connection, TlsMode};
 use rocket::request::{FromRequest, FromForm, FromSegments, Form, FormItems, Request};
 use rocket::outcome::Outcome;
@@ -31,6 +33,10 @@ mod authentication;
 use authentication::AuthenticationInfo;
 mod scene;
 use scene::Scene;
+mod mmapstate;
+use mmapstate::MmapImageState;
+mod png;
+use png::{scan_image_as_png, scan_image_as_png_size};
 
 fn db_connect() -> Connection
 {
@@ -270,13 +276,27 @@ fn scene_put(scene: Scene, auth: AuthenticationInfo, upload: Data) -> Result<Sen
 		return Err(sink_put(upload, Error::InvalidOrigin));	//Don't barf.
 	}};
 
+	//Grab width and height of scene.
+	let (w, h) = if let Some(row) = conn.query("SELECT width, height FROM scenes WHERE sceneid=$1", &[&scene]).
+		unwrap().iter().next() {
+		let w: i32 = row.get(0);
+		let h: i32 = row.get(1);
+		(w, h)
+	} else {
+		return Err(sink_put(upload, Error::SceneNotFound));	//Don't barf.
+	};
+
 	//Use prepared statement to improve performance.
+	let mmap = MmapImageState::new(format!("/home/pbn/currentstate/{}", scene.as_inner()), w as usize, h as
+		usize).unwrap();
 	let stmt = conn.prepare("INSERT INTO scene_data (sceneid,timestamp,username,color,x,y) VALUES \
 		($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING").unwrap();
 	conn.execute("BEGIN TRANSACTION", &[]).unwrap();
 	let mut upload = upload.open();
-	let events = match parse_event_stream(&mut upload, &|ev|{stmt.execute(&[&scene, &ev.ts,
-		&ev.username, &ev.color, &ev.x, &ev.y]).unwrap();}).map_err(|x|Error::BadEventStream(x)) {
+	let events = match parse_event_stream(&mut upload, &|ev|{
+			mmap.write_pixel(ev.x, ev.y, ev.ts, ev.color);
+			stmt.execute(&[&scene, &ev.ts, &ev.username, &ev.color, &ev.x, &ev.y]).unwrap();
+		}).map_err(|x|Error::BadEventStream(x)) {
 		Ok(x) => x,
 		Err(x) => return Err(sink_put_remaining(upload, x))
 	};
@@ -367,6 +387,16 @@ fn scene_post(scene: Scene, auth: AuthenticationInfo, upload: Form<ScenePostForm
 
 	auth.check_write(&mut conn, scene).map_err(|_|Error::InvalidOrigin)?;
 
+	//Grab width and height of scene.
+	let (w, h) = if let Some(row) = conn.query("SELECT width, height FROM scenes WHERE sceneid=$1", &[&scene]).
+		unwrap().iter().next() {
+		let w: i32 = row.get(0);
+		let h: i32 = row.get(1);
+		(w, h)
+	} else {
+		return Err(Error::SceneNotFound);
+	};
+
 	match upload.into_inner() {
 		ScenePostForm::Grant(grant) => {
 			let appid: i32 = conn.query("SELECT appid FROM applications WHERE origin=$1 AND temporary=false",
@@ -381,6 +411,9 @@ fn scene_post(scene: Scene, auth: AuthenticationInfo, upload: Form<ScenePostForm
 				&scene]).unwrap();
 		},
 		ScenePostForm::Event(ev) => {
+			let mmap = MmapImageState::new(format!("/home/pbn/currentstate/{}", scene.as_inner()),
+				w as usize, h as usize).unwrap();
+			mmap.write_pixel(ev.x, ev.y, ev.ts, ev.color);
 			conn.execute("INSERT INTO scene_data (sceneid,timestamp,username,color,x,y) VALUES ($1,$2,\
 				$3,$4,$5,$6) ON CONFLICT DO NOTHING", &[&scene, &ev.ts, &ev.username, &ev.color,
 				&ev.x, &ev.y]).unwrap();
@@ -470,6 +503,28 @@ fn scene_get(scene: Scene, range: GetBounds) -> Result<SendFileAsWithCors, Error
 	Ok(SendFileAsWithCors("application/json", out.into_bytes()))
 }
 
+/************************* PNG EXPORT ******************************************************************************/
+#[get("/scenes/<scene>/png")]
+fn scene_get_png(scene: Scene) -> Result<SendFileAs, Error>
+{
+	let conn = db_connect();
+	//Grab width and height of scene.
+	let (w, h) = if let Some(row) = conn.query("SELECT width, height FROM scenes WHERE sceneid=$1", &[&scene]).
+		unwrap().iter().next() {
+		let w: i32 = row.get(0);
+		let h: i32 = row.get(1);
+		(w, h)
+	} else {
+		return Err(Error::SceneNotFound);
+	};
+	let mmap = MmapImageState::new(format!("/home/pbn/currentstate/{}", scene.as_inner()),
+		w as usize, h as usize).unwrap();
+	let mut out = Cursor::new(Vec::with_capacity(scan_image_as_png_size(&mmap)));
+	scan_image_as_png(&mut out, &mmap);
+	let out = out.into_inner();
+	Ok(SendFileAs("application/png", out))
+}
+
 
 /************************* LSMV EXPORT *****************************************************************************/
 #[get("/scenes/<scene>/lsmv")]
@@ -537,6 +592,7 @@ fn main() {
 		scene_post,
 		scene_delete,
 		scene_get_lsmv,
+		scene_get_png,
 		scenes_options,
 		scenes_get,
 		scenes_post,

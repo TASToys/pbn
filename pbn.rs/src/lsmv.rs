@@ -122,7 +122,7 @@ fn write_lsmv_file(sceneid: &str, width: u16, height: u16, movie: &[MovieEvent])
 }
 
 #[derive(Debug)]
-pub struct SendFileAs(&'static str, Vec<u8>);
+pub struct SendFileAs(pub &'static str, pub Vec<u8>);
 
 impl<'r> Responder<'r> for SendFileAs
 {
