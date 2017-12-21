@@ -197,27 +197,41 @@ fn parse_one_event<R:IoRead>(stream: &mut JsonStream<R>) -> Result<EventInfo, St
 	let mut x = None;
 	let mut y = None;
 	stream.do_object(|stream, key|{
-		let value = match stream.next(&|x|format!("Error reading Event: {}", x))? {
-			JsonToken::String(value) => value,
-			JsonToken::Numeric(value) => value,
-			x => return Err(format!("Expected number or string for value of event key '{}', got {:?}",
-				key, x))
-		};
-		if key == "ts" { ts = Some(value); }
-		else if key == "u" { username = Some(value); }
-		else if key == "c" { color = Some(value); }
-		else if key == "x" { x = Some(value); }
-		else if key == "y" { y = Some(value); }
-		else { return Err(format!("Unrecognized event key '{}'", key)); }
+		if key == "ts" {
+			ts = Some(match stream.next(&|x|format!("Error reading Event: {}", x))? {
+				JsonToken::NumericInteger(value) => value,
+				x => return Err(format!("Expected integer for event key 'ts', got {:?}", x))
+			});
+		} else if key == "u" {
+			username = Some(match stream.next(&|x|format!("Error reading Event: {}", x))? {
+				JsonToken::String(value) => value,
+				x => return Err(format!("Expected string for event key 'u', got {:?}", x))
+			});
+		} else if key == "c" {
+			color = Some(match stream.next(&|x|format!("Error reading Event: {}", x))? {
+				JsonToken::NumericInteger(value) => checkpos2(value, "c")?,
+				x => return Err(format!("Expected integer for event key 'c', got {:?}", x))
+			});
+		} else if key == "x" {
+			x = Some(match stream.next(&|x|format!("Error reading Event: {}", x))? {
+				JsonToken::NumericInteger(value) => checkpos2(value, "x")?,
+				x => return Err(format!("Expected integer for event key 'x', got {:?}", x))
+			});
+		} else if key == "y" {
+			y = Some(match stream.next(&|x|format!("Error reading Event: {}", x))? {
+				JsonToken::NumericInteger(value) => checkpos2(value, "y")?,
+				x => return Err(format!("Expected integer for event key 'y', got {:?}", x))
+			});
+		} else { return Err(format!("Unrecognized event key '{}'", key)); }
 		Ok(())
 	}, &|x|format!("Error in Event object: {}", x))?;
 	match (ts, username, color, x, y) {
 		(Some(ts), Some(username), Some(color), Some(x), Some(y)) => Ok(EventInfo{
-			ts: i64::from_str(&ts).map_err(|_|format!("Bad event ts '{}'", ts))?,
+			ts: ts,
 			username: username,
-			color: checkpos(i32::from_str(&color), "c").map_err(|_|format!("Bad event c '{}'", color))?,
-			x: checkpos(i32::from_str(&x), "x").map_err(|_|format!("Bad event x '{}'", x))?,
-			y: checkpos(i32::from_str(&y), "y").map_err(|_|format!("Bad event y '{}'", y))?,
+			color: color,
+			x: x,
+			y: y,
 		}),
 		_=> Err(format!("Need fields ts, u, c, x and y for Event object"))
 	}
@@ -281,6 +295,12 @@ fn scene_options(scene: Scene) -> Result<SendFileAsWithCors, Error>
 
 
 /************************* POST SCENE ******************************************************************************/
+fn checkpos2(x: i64, name: &str) -> Result<i32, String>
+{
+	if x >= 0 && x <= 0x7FFFFFFF { return Ok(x as i32); }
+	Err(format!("Integer value for field '{}' out of range", name))
+}
+
 fn checkpos<E>(x: Result<i32, E>, name: &str) -> Result<i32, Error>
 {
 	if let Ok(x) = x {

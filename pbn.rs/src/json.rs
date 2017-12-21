@@ -3,6 +3,7 @@ use std::char::from_u32;
 use std::fmt::{Display, Formatter, Error as FmtError};
 use std::io::Read as IoRead;
 use std::str::from_utf8;
+use std::str::FromStr;
 
 #[derive(Clone,Debug)]
 pub enum JsonTokenError
@@ -55,6 +56,7 @@ pub enum JsonToken
 	Boolean(bool),
 	Null,
 	Numeric(String),
+	NumericInteger(i64),	//Numbers that fit in 64-bit signed type.
 	String(String),
 	None,
 }
@@ -86,7 +88,42 @@ fn nclassify(x: char) -> u32
 	}
 }
 
-fn json_parse_numeric(x: &str, end: bool) -> Result<(usize, String), String>
+trait StringOrBorrow
+{
+	fn borrow<'a>(&'a self) -> &'a str;
+	fn get(self) -> String;
+}
+
+impl StringOrBorrow for String
+{
+	fn borrow<'a>(&'a self) -> &'a str { &self }
+	fn get(self) -> String { self }
+}
+
+impl<'b> StringOrBorrow for &'b str
+{
+	fn borrow<'a>(&'a self) -> &'a str { self }
+	fn get(self) -> String { self.to_owned() }
+}
+
+enum StringOrInteger
+{
+	String(String),
+	Integer(i64),
+}
+
+impl StringOrInteger
+{
+	fn from2<S:StringOrBorrow>(x: S) -> StringOrInteger
+	{
+		match i64::from_str(x.borrow()) {
+			Ok(x) => StringOrInteger::Integer(x),
+			Err(_) => StringOrInteger::String(x.get())
+		}
+	}
+}
+
+fn json_parse_numeric(x: &str, end: bool) -> Result<(usize, StringOrInteger), String>
 {
 	const STATE_INIT: u32 = 0;	//Initial.
 	const STATE_FNUM: u32 = 1;	//First number.
@@ -129,7 +166,9 @@ fn json_parse_numeric(x: &str, end: bool) -> Result<(usize, String), String>
 		}
 		//Check suitable last state.
 		match state {
-			STATE_CNUM|STATE_ZERO|STATE_CDEC|STATE_EXPC => return Ok((x.len(), x.to_owned())),
+			STATE_CNUM|STATE_ZERO|STATE_CDEC|STATE_EXPC => {
+				return Ok((x.len(), StringOrInteger::from2(x)));
+			}
 			_ => (),	//Failed.
 		}
 	}
@@ -176,11 +215,11 @@ fn json_parse_numeric(x: &str, end: bool) -> Result<(usize, String), String>
 		if state != STATE_FINI {
 			y.push(i);
 		} else {
-			return Ok((y.len(), y));
+			return Ok((x.len(), StringOrInteger::from2(x)));
 		}
 	}
 	match state {
-		STATE_CNUM|STATE_ZERO|STATE_CDEC|STATE_EXPC if end => Ok((y.len(), y)),
+		STATE_CNUM|STATE_ZERO|STATE_CDEC|STATE_EXPC if end => Ok((x.len(), StringOrInteger::from2(x))),
 		_ if !end => Err(format!("Numeric token too long")),
 		STATE_INIT => Err(format!("Got EoF expecting sign or first number")),
 		STATE_FNUM => Err(format!("Got EoF expecting first number")),
@@ -333,7 +372,10 @@ impl JsonToken
 			48...57|45 => {
 				//Numeric.
 				match json_parse_numeric(&partial[idx..], end) {
-					Ok((nlen, n)) => Ok((idx + nlen, JsonToken::Numeric(n))),
+					Ok((nlen, StringOrInteger::String(n))) => Ok((idx + nlen,
+						JsonToken::Numeric(n))),
+					Ok((nlen, StringOrInteger::Integer(n))) => Ok((idx + nlen,
+						JsonToken::NumericInteger(n))),
 					Err(x) => Err(JsonTokenError::BadNumberFormat(x))
 				}
 			},
