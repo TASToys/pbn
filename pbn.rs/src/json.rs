@@ -331,9 +331,72 @@ fn json_parse_string(x: &str, end: bool) -> Result<(usize, String), String>
 	}
 	Err(if end { format!("EoF while reading string") } else { format!("String token too long") })
 }
-
+/*
+const ETAB: [u64;18] = [
+	1000000000000000000,
+	100000000000000000,
+	10000000000000000,
+	1000000000000000,
+	100000000000000,
+	10000000000000,
+	1000000000000,
+	100000000000,
+	10000000000,
+	1000000000,
+	100000000,
+	10000000,
+	1000000,
+	100000,
+	10000,
+	1000,
+	100,
+	10,
+];
+*/
 impl JsonToken
 {
+/*
+	pub fn write<W:Write>(&self, output: &mut W) -> Result<(), IoError>
+	{
+		match self {
+			&JsonToken::StartArray => output.write_all(b"["),
+			&JsonToken::EndArray => output.write_all(b"]"),
+			&JsonToken::StartObject => output.write_all(b"{"),
+			&JsonToken::EndObject => output.write_all(b"}"),
+			&JsonToken::DoubleColon => output.write_all(b":"),
+			&JsonToken::Comma => output.write_all(b","),
+			&JsonToken::Boolean(false) => output.write_all(b"false"),
+			&JsonToken::Boolean(true) => output.write_all(b"true"),
+			&JsonToken::Null => output.write_all(b"null"),
+			&JsonToken::Numeric(ref x) => output.write_all(x.as_bytes()),
+			&JsonToken::NumericInteger(x) => {
+				//Numeric integer always fits in 20 bytes.
+				let mut buf = [0;20];
+				let mut idx = 0;
+				if x < 0 { buf[idx] = b'-'; idx += 1; }
+				let mut x = if x < 0 { -x as u64 } else { x as u64 };
+				for i in 0..18 {
+					if x > ETAB[i] {
+						//Calculating quotent and remainder together is fast on amd64.
+						let q = x / ETAB[i];
+						x = x % ETAB[i];
+						buf[idx] = 48 + q as u8;
+						idx += 1;
+					}
+				}
+				buf[idx] = 48 + x as u8;
+				idx += 1;
+				output.write_all(&buf[..idx]),
+			}
+			&JsonToken::String(ref x) => {
+				output.write_all(b"\"")?,
+				output.write_all(escape_json_string(x).deref().as_bytes())?,
+				output.write_all(b"\""),
+			},
+			&JsonToken::None => Ok(())
+		}
+	}
+*/
 	fn next(partial: &str, end: bool) -> Result<(usize, JsonToken), JsonTokenError>
 	{
 		let mut idx = 0;

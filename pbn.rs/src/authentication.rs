@@ -48,12 +48,19 @@ impl AuthenticationInfo
 		Ok(conn.query("SELECT appid FROM applications WHERE origin=$1 AND temporary=false",
 			&[&realorigin]).unwrap().iter().next().ok_or(())?.get(0))
 	}
-	pub fn check_write(&self, conn: &mut Connection, scene: Scene) -> Result<i32, ()>
+	pub fn check_write(&self, conn: &mut Connection, scene: Scene) -> Result<i32, bool>
 	{
-		let appid = self.get_origin(conn, true)?;
+		let appid = self.get_origin(conn, true).map_err(|_|true)?;
 		let has_access: i64 = conn.query("SELECT COUNT(sceneid) FROM application_scene WHERE \
 			appid=$1 AND sceneid=$2", &[&appid,&scene]).unwrap().iter().next().unwrap().get(0);
-		if has_access > 0 { Ok(appid) } else { Err(()) }
+		if has_access == 0 {
+			//Check if this exists at all.
+			let exists: i64 = conn.query("SELECT COUNT(sceneid) FROM scenes WHERE sceneid=$1",
+				&[&scene]).unwrap().iter().next().unwrap().get(0);
+			Err(exists > 0)
+		} else {
+			Ok(appid)
+		}
 	}
 }
 
