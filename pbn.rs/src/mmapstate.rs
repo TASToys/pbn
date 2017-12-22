@@ -10,6 +10,7 @@ use std::io::Error as IoError;
 use std::os::unix::ffi::OsStrExt;
 use std::ffi::CString;
 use std::cmp::min;
+use std::mem::size_of;
 
 trait LibcError: Copy { fn is_error(self) -> bool; }
 impl LibcError for i32 { fn is_error(self) -> bool { self < 0 } }
@@ -52,7 +53,8 @@ impl FileDescriptor
 	{
 		libc_error(unsafe{lseek(self.0, off, whence)})
 	}
-	fn mmap<T>(&self, prot: c_int, flags: c_int, size: usize, offset: off_t) -> Result<MappedArea<T>, IoError>
+	fn mmap<T:Copy>(&self, prot: c_int, flags: c_int, size: usize, offset: off_t) ->
+		Result<MappedArea<T>, IoError>
 	{
 		unsafe {
 			let ptr = mmap(null::<c_void>() as _, size as _, prot, flags, self.0, offset);
@@ -63,9 +65,9 @@ impl FileDescriptor
 }
 
 #[derive(Debug)]
-struct MappedArea<T>(*mut T, usize);
+struct MappedArea<T:Copy>(*mut T, usize);
 
-impl<T> Drop for MappedArea<T>
+impl<T:Copy> Drop for MappedArea<T>
 {
 	fn drop(&mut self)
 	{
@@ -73,14 +75,16 @@ impl<T> Drop for MappedArea<T>
 	}
 }
 
-impl<T> MappedArea<T>
+impl<T:Copy> MappedArea<T>
 {
 	fn read(&self, offset: usize) -> T
 	{
+		if (offset+1)*size_of::<T>() > self.1 { panic!("Mapped area read out of range"); }
 		unsafe{read_volatile(self.0.offset(offset as isize))}
 	}
 	fn write(&self, offset: usize, value: T)
 	{
+		if (offset+1)*size_of::<T>() > self.1 { panic!("Mapped area write out of range"); }
 		unsafe{write_volatile(self.0.offset(offset as isize), value)}
 	}
 }
