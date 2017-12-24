@@ -1,4 +1,4 @@
-use ::{db_connect, sink_put, sink_put_remaining};
+use ::{db_connect, sink_put, sink_put_remaining, root_path};
 use ::authentication::AuthenticationInfo;
 use ::cors::SendFileAsWithCors;
 use ::error::Error;
@@ -229,8 +229,8 @@ pub fn scene_edit_put(scene: Scene, auth: AuthenticationInfo, upload: Data) -> R
 	};
 
 	//Use prepared statement to improve performance.
-	let mmap = MmapImageState::new(format!("/home/pbn/currentstate/{}", scene.as_inner()), w as usize, h as
-		usize).unwrap();
+	let mmap = MmapImageState::new(format!("{}/currentstate/{}", root_path(), scene.as_inner()), w as usize, h
+		as usize).unwrap();
 	let stmt = conn.prepare("INSERT INTO scene_data (sceneid,timestamp,username,color,x,y) VALUES \
 		($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING").unwrap();
 	conn.execute("BEGIN TRANSACTION", &[]).unwrap();
@@ -350,7 +350,7 @@ pub fn scene_edit_post(scene: Scene, auth: AuthenticationInfo, upload: Form<Scen
 				&scene]).unwrap();
 		},
 		ScenePostForm::Event(ev) => {
-			let mmap = MmapImageState::new(format!("/home/pbn/currentstate/{}", scene.as_inner()),
+			let mmap = MmapImageState::new(format!("{}/currentstate/{}", root_path(), scene.as_inner()),
 				w as usize, h as usize).unwrap();
 			mmap.write_pixel(ev.x, ev.y, ev.ts, ev.color);
 			conn.execute("INSERT INTO scene_data (sceneid,timestamp,username,color,x,y) VALUES ($1,$2,\
@@ -400,7 +400,7 @@ pub fn scene_get_png(scene: Scene) -> Result<impl Responder<'static>, Error>
 	} else {
 		return Err(Error::SceneNotFound);
 	};
-	let mmap = MmapImageState::new(format!("/home/pbn/currentstate/{}", scene.as_inner()),
+	let mmap = MmapImageState::new(format!("{}/currentstate/{}", root_path(), scene.as_inner()),
 		w as usize, h as usize).unwrap();
 	let mut out = Cursor::new(Vec::with_capacity(scan_image_as_png_size(&mmap)));
 	scan_image_as_png(&mut out, &mmap);
@@ -444,7 +444,7 @@ pub fn scene_config_get(scene: Scene) -> Result<impl Responder<'static>, Error>
 		return Err(Error::SceneNotFound);
 	};
 	let mut content = Vec::new();
-	if File::open(format!("/home/pbn/sconfigs/{}", scene.as_inner())).and_then(|mut f|f.read_to_end(
+	if File::open(format!("{}/sconfigs/{}", root_path(), scene.as_inner())).and_then(|mut f|f.read_to_end(
 		&mut content)).is_err() {
 		return Ok(SendFileAsWithCors{
 			content_type: "application/octet-stream",
@@ -482,8 +482,8 @@ pub fn scene_config_put(scene: Scene, auth: AuthenticationInfo, upload: Data) ->
 		if amt == 0 { break; }
 		fill += amt;
 	}
-	let tname = format!("/home/pbn/sconfigs/{}.tmp", scene.as_inner());
-	let fname = format!("/home/pbn/sconfigs/{}", scene.as_inner());
+	let tname = format!("{}/sconfigs/{}.tmp", root_path(), scene.as_inner());
+	let fname = format!("{}/sconfigs/{}", root_path(), scene.as_inner());
 	File::create(&tname).and_then(|mut f|f.write_all(&upbuf[..fill])).unwrap();
 	rename(&tname, &fname).unwrap();
 	//Ok.

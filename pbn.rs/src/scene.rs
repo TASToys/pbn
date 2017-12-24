@@ -1,3 +1,4 @@
+use super::get_scene_key;
 use super::error::Error;
 use md5::compute;
 use postgres::types::{Type, IsNull, FromSql, ToSql};
@@ -5,29 +6,28 @@ use rocket::request::FromParam;
 use rocket::http::RawStr;
 use std::error::Error as ErrorTrait;
 
-static SEED: &'static [u8] = b"9vk2VmEsHICVXQNMYHAOF7Fe6lzR7eMq";
-
-fn random_f(n: u32) -> u32
+fn random_f(n: u32, seed: &[u8]) -> u32
 {
 	let mut buf = [0; 55];
-	(&mut buf[..SEED.len()]).copy_from_slice(&SEED[..]);
-	buf[SEED.len()+0] = (n >> 16) as u8;
-	buf[SEED.len()+1] = (n >> 8) as u8;
-	buf[SEED.len()+2] = (n >> 0) as u8;
-	let res = compute(&buf[..SEED.len()+3]);
+	(&mut buf[..seed.len()]).copy_from_slice(&seed[..]);
+	buf[seed.len()+0] = (n >> 16) as u8;
+	buf[seed.len()+1] = (n >> 8) as u8;
+	buf[seed.len()+2] = (n >> 0) as u8;
+	let res = compute(&buf[..seed.len()+3]);
 	let res = res.as_ref();
 	(res[0] as u32 & 127) * 256 + (res[1] as u32) 
 }
 
 fn permute(n: i32) -> [u8;6]
 {
+	let seed: Vec<u8> = get_scene_key();
 	let n = n as u32;
 	let l = n >> 15;
 	let r = n & 0x7FFF;
-	let r = r ^ random_f(0x00000 | l);
-	let l = l ^ random_f(0x08000 | r);
-	let r = r ^ random_f(0x10000 | l);
-	let l = l ^ random_f(0x18000 | r);
+	let r = r ^ random_f(0x00000 | l, &seed);
+	let l = l ^ random_f(0x08000 | r, &seed);
+	let r = r ^ random_f(0x10000 | l, &seed);
+	let l = l ^ random_f(0x18000 | r, &seed);
 	let n = (l << 15) | r;
 	let mut ret = [0;6];
 	static LETTERS: &'static [u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
@@ -39,6 +39,7 @@ fn permute(n: i32) -> [u8;6]
 
 fn unpermute(s: &[u8]) -> i32
 {
+	let seed: Vec<u8> = get_scene_key();
 	let mut n = 0;
 	for i in 0..6 {
 		let c = s[i];
@@ -51,10 +52,10 @@ fn unpermute(s: &[u8]) -> i32
 	}
 	let l = n >> 15;
 	let r = n & 0x7FFF;
-	let l = l ^ random_f(0x18000 | r);
-	let r = r ^ random_f(0x10000 | l);
-	let l = l ^ random_f(0x08000 | r);
-	let r = r ^ random_f(0x00000 | l);
+	let l = l ^ random_f(0x18000 | r, &seed);
+	let r = r ^ random_f(0x10000 | l, &seed);
+	let l = l ^ random_f(0x08000 | r, &seed);
+	let r = r ^ random_f(0x00000 | l, &seed);
 	((l << 15) | r) as i32
 }
 

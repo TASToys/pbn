@@ -10,10 +10,10 @@ rand = "0.3.18"
 libc = "0.2"
 
 [dependencies.rocket]
-git = "file:///home/pbn/Rocket"
+path = "Rocket/lib"
 
 [dependencies.rocket_codegen]
-git = "file:///home/pbn/Rocket"
+path = "Rocket/codegen"
 
 [profile.release]
 debug=true

@@ -1,3 +1,4 @@
+use super::root_path;
 use rocket::request::Request;
 use rocket::response::{Responder, Response, NamedFile};
 use rocket::http::{Status, ContentType};
@@ -47,6 +48,6 @@ impl<'r,R:Responder<'r>> Responder<'r> for MoreContentTypeGuessing<'r,R>
 //Pathbuf as parameter does not accept path transversal.
 pub fn serve_file(file: PathBuf) -> impl Responder<'static>
 {
-	NamedFile::open(Path::new("/home/pbn/static/").join(&file)).ok().map(|f|MoreContentTypeGuessing::new(f,
-		file))
+	NamedFile::open(Path::new(&format!("{}/static/", root_path())).join(&file)).ok().map(|f|
+		MoreContentTypeGuessing::new(f, file))
 }

@@ -1,4 +1,4 @@
-
+/*
 use super::parse_event_stream;
 extern crate test;
 use self::test::Bencher;
@@ -25,7 +25,7 @@ fn test_json_parse_large(b: &mut Bencher)
 		black_box(parse_event_stream(&mut strm, &|ev|{black_box(ev);})).ok();
 	});
 }
-
+*/
 /*
 use super::json::json_parse_numeric;
 use super::json::json_parse_string;

@@ -11,8 +11,15 @@ use postgres::{Connection, TlsMode};
 use rocket::request::Form;
 use rocket::response::Responder;
 use rocket::Data;
+use std::char::from_u32;
+use std::fs::File;
 use std::io::Read as IoRead;
+use std::fmt::Write as FmtWrite;
 use std::path::PathBuf;
+use std::rc::Rc;
+use std::cell::RefCell;
+use std::ffi::CStr;
+use libc::{getuid, getpwuid};
 
 mod json;
 mod lsmv;
@@ -39,7 +46,7 @@ use scene_endpoint::{scene_get as _scene_get, scene_options as _scene_options,
 
 fn db_connect() -> Connection
 {
-	Connection::connect("pq://pbn@%2fvar%2frun%2fpostgresql%2f/pbndb", TlsMode::None).unwrap()
+	Connection::connect(get_db_url(), TlsMode::None).unwrap()
 }
 
 
@@ -191,6 +198,95 @@ fn main() {
 		scenes_post,
 	]).launch();
 }
+
+struct Config
+{
+	db_user: String,
+	db_path: String,
+	db_name: String,
+	scene_key: Vec<u8>,
+	rootpath: String,
+}
+
+impl Config
+{
+	#[allow(unsafe_code)]
+	fn new() -> Config
+	{
+		let pwd = unsafe{getpwuid(getuid())};
+		if pwd.is_null() { panic!("No home directory for current user in user database"); }
+		if unsafe{(*pwd).pw_uid} == 0 { panic!("Running as root??? Are you insane???"); }
+		let root = match unsafe{CStr::from_ptr((*pwd).pw_dir)}.to_str() { Ok(x) => x.to_owned(), Err(_) => {
+			panic!("User home directory in user database is not valid UTF-8");
+		}};
+		let cfilename = format!("{}/pbn.conf", root);
+		let mut content = String::new();
+		match File::open(&cfilename).and_then(|mut f|f.read_to_string(&mut content)) {
+			Ok(_) => (),
+			Err(x) => panic!("Failed to read the config file {}: {}", cfilename, x)
+		};
+		let mut i = content.lines();
+		let duser = i.next().unwrap().to_owned();
+		let dpath = i.next().unwrap().to_owned();
+		let dname = i.next().unwrap().to_owned();
+		let key = i.next().unwrap().as_bytes().to_owned();
+		Config{
+			db_user: duser,
+			db_path: dpath,
+			db_name: dname,
+			scene_key: key,
+			rootpath: root,
+		}
+	}
+	fn get<F>(mut cb: F) where F: FnMut(&Config)
+	{
+		thread_local!(static CONFIG_FOR_THREAD: Rc<RefCell<Config>> = {Rc::new(RefCell::new(
+			Config::new()))});
+		CONFIG_FOR_THREAD.with(|y|cb(&y.borrow()));
+	}
+}
+
+fn get_db_url() -> String
+{
+	let mut user = String::new();
+	let mut path = String::new();
+	let mut name = String::new();
+	Config::get(|c|{
+		user = c.db_user.clone();
+		path = c.db_path.clone();
+		name = c.db_name.clone();
+	});
+	//Escape all non alphanumerics from path.
+	let mut path2 = String::new();
+	for i in path.as_bytes().iter() {
+		if (*i >= 48 && *i <= 57) || (*i >= 65 && *i <= 90) || (*i >= 97 && *i <= 122) {
+			path2.push(from_u32(*i as u32).unwrap());
+		} else {
+			write!(path2, "%{:02x}", i).unwrap();
+		}
+	}
+	format!("pq://{}@{}/{}", user, path2, name)
+}
+
+fn get_scene_key() -> Vec<u8>
+{
+	let mut key = Vec::new();
+	Config::get(|c|{
+		key = c.scene_key.clone();
+	});
+	key
+}
+
+fn root_path() -> String
+{
+	let mut path = String::new();
+	Config::get(|c|{
+		path = c.rootpath.clone();
+	});
+	path
+}
+
+
 
 #[cfg(test)]
 mod tests;
