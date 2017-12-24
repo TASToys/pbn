@@ -14,6 +14,7 @@ pub enum Error
 	BadEventStream(String),
 	MethodNotSupported,
 	NotFound,
+	ConfigTooBig,
 }
 
 trait StringTrait { fn get(self) -> String; }
@@ -46,6 +47,8 @@ impl<'r> Responder<'r> for Error
 			Error::BadFormField(f) => make_response(&mut response, 422, "Bad form field", format!(
 				"Bad form field: {}\n", f)),
 			Error::BadGrant => make_response(&mut response, 422, "Bad grant", "Bad grant\n"),
+			Error::ConfigTooBig => make_response(&mut response, 422, "Config too big",
+				"Config too big\n"),
 			Error::BadEventStream(f) => make_response(&mut response, 422, "Bad event stream", format!(
 				"Bad event stream {}\n", f)),
 		}

@@ -1,0 +1,110 @@
+Scene IDs:
+----------
+Scene IDs are always 6 characters, consisting of A-Z and 2-7. These are
+assigned in pseudorandom order.
+
+Authentication:
+---------------
+Send HTTP header 'origin' or 'api-origin' containing (sub)application
+id, and HTTP header 'api-key' containing the subapplication-specific
+API key.
+
+
+Endpoint: GET /scenes
+---------------------
+Authenticated: Yes
+
+Returns a JSON object. The keys are Scene IDs and values are scene
+descriptions. This object is filtered to contain just the scene IDs
+the application has privileged access to.
+
+Endpoint: POST /scenes
+----------------------
+Authenticated: Yes
+
+Creates a new scene. Send a urlencoded POST body with the following
+fields:
+
+name: The description for the new scene.
+width: The width of new scene in cells.
+height: The height of new scene in cells.
+
+The width and height must be positive and there may be at most 2^21
+cells total in scene.
+
+Endpoint: GET /scenes/<sceneid>
+-------------------------------
+Authenticated: No
+
+Get events in scene. This endpoint returns a JSON object with three
+fields:
+
+- data: An array of events.
+- width: Integer width of scene in cells.
+- height: Integer height of scene in cells.
+
+In array of events, each element is an event object, which has the
+following fields:
+
+ts: The timestamp of events (milliseconds)
+u: The user that caused the event.
+c: The color. Bits 0-7 are blue channel, 8-15 are green channel,
+	16-23 are red channel and 24-31 are unused.
+x: The x coordinate (cells, 0 is left, increases to right)
+y: The y coordinate (cells, 0 is top, increases to bottom)
+
+Optional GET query parameters 'since' and 'unti' can be used.
+These specify earliest and latest timestamp to send events for.
+
+Endpoint: GET /scenes/<sceneid>/png
+-----------------------------------
+Authenticated: No
+
+Returns the current state of scene in PNG format. Unwritten cells
+are transparent, written ones are fully opaque.
+
+Endpoint: GET /scenes/<sceneid>/lsmv
+------------------------------------
+Authenticated: No
+
+Return lsnes-pbn format binary LSMV movie file (usernames are lost
+in conversion and timescale is granularized to 60fps.
+
+
+Endpoint: POST /scenes/<sceneid>/edit
+-------------------------------------
+Authenticated: Yes.
+
+Scene management actions. Send url-encoded POST body with the
+following field:
+
+a: The application ID to add access to. Note: This does not accept
+	subapplication IDs, you need to convert them into application
+	IDs first by removing the first '#' and everything after that.
+d: The application ID to remove access from. The same note about
+	subapplication IDs applies as in add access cases.
+	
+Endpoint: PUT /scenes/<sceneid>/edit
+------------------------------------
+Authenticated: Yes.
+
+Write events to scene. PUT body is a JSON object with the following
+fields:
+
+data: Array of events to write.
+
+Each element in events array is in the same format as in the GET
+/scenes/<sceneid> endpoint.
+
+
+Endpoint: GET /scenes/<sceneid>/config
+--------------------------------------
+Authenticated: No
+
+Returns the config string of the scene.
+
+Endpoint: PUT /scenes/<sceneid>/config
+--------------------------------------
+Authenticated: Yes
+
+Sets the config string of the scene. The maximum size is 16kB.

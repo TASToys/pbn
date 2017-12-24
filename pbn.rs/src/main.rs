@@ -34,7 +34,8 @@ mod scene_endpoint;
 use scene_endpoint::{scene_get as _scene_get, scene_options as _scene_options,
 	scene_edit_delete as _scene_edit_delete, scene_edit_options as _scene_edit_options,
 	scene_edit_post as _scene_edit_post, scene_edit_put as _scene_edit_put, scene_get_png as _scene_get_png,
-	scene_get_lsmv as _scene_get_lsmv, GetBounds, ScenePostForm};
+	scene_get_lsmv as _scene_get_lsmv, GetBounds, ScenePostForm, scene_config_options as _scene_config_options,
+	scene_config_get as _scene_config_get, scene_config_put as _scene_config_put};
 
 fn db_connect() -> Connection
 {
@@ -129,6 +130,30 @@ fn scene_get_lsmv(scene: Option<Scene>) -> Result<impl Responder<'static>, Error
 	_scene_get_lsmv(scene)
 }
 
+#[options("/scenes/<scene>/config")]
+fn scene_config_options(scene: Option<Scene>) -> Result<impl Responder<'static>, Error>
+{
+	scene.ok_or(Error::SceneNotFound)?;
+	_scene_config_options()
+}
+
+#[get("/scenes/<scene>/config")]
+fn scene_config_get(scene: Option<Scene>) -> Result<impl Responder<'static>, Error>
+{
+	let scene = scene.ok_or(Error::SceneNotFound)?;
+	_scene_config_get(scene)
+}
+
+#[put("/scenes/<scene>/config", data="<upload>")]
+fn scene_config_put(scene: Option<Scene>, auth: AuthenticationInfo, upload: Data) ->
+	Result<impl Responder<'static>, Error>
+{
+	match scene {
+		Some(scene) => _scene_config_put(scene, auth, upload),
+		None => Err(sink_put(upload, Error::SceneNotFound))
+	}
+}
+
 fn sink_put_remaining<R:IoRead,T:Sized>(mut stream: R, error: T) -> T
 {
 	//Read the event stream to the end to avoid Rocket barfing.
@@ -156,13 +181,16 @@ fn main() {
 		scene_edit_put,
 		scene_edit_post,
 		scene_edit_delete,
+		//Scene config.
+		scene_config_options,
+		scene_config_get,
+		scene_config_put,
 		//Scenes.
 		scenes_options,
 		scenes_get,
 		scenes_post,
 	]).launch();
 }
-
 
 #[cfg(test)]
 mod tests;

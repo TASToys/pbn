@@ -56,6 +56,7 @@ pub fn scenes_get(auth: AuthenticationInfo) -> impl Responder<'static>
 }
 
 const MAXI32: u32 = 0x7FFFFFFF;
+const MAXPIXELS: u32 = 1 << 21;
 
 #[derive(FromForm)]
 pub struct SceneInfo
@@ -72,7 +73,8 @@ pub fn scenes_post(auth: AuthenticationInfo, upload: Form<SceneInfo>) -> impl Re
 
 	let upload = upload.into_inner();
 	let name = upload.name;
-	let (w, h) = if upload.width > 0 && upload.height > 0 && upload.width <= MAXI32 && upload.height <= MAXI32 {
+	let (w, h) = if upload.width > 0 && upload.height > 0 && upload.width <= MAXI32 && upload.height <= MAXI32
+		&& upload.width.checked_mul(upload.height).unwrap_or(MAXI32) <= MAXPIXELS {
 		(upload.width as i32, upload.height as i32)
 	} else {
 		return Err(Error::InvalidDimensions);

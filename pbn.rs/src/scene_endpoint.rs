@@ -15,6 +15,8 @@ use rocket::http::uri::Uri;
 use rocket::Data;
 use std::borrow::Cow;
 use std::fmt::Write as FmtWrite;
+use std::io::Write as IoWrite;
+use std::fs::{File,rename};
 use std::io::Cursor;
 use std::io::Read as IoRead;
 use std::ops::Deref;
@@ -411,9 +413,84 @@ pub fn scene_get_png(scene: Scene) -> Result<impl Responder<'static>, Error>
 	})
 }
 
+const SCENE_CONFIG_METHODS: &'static str = "HEAD, GET, PUT";
+const SCENE_CONFIG_HEADERS: &'static str = "api-origin, api-key, content-type";
 
 pub fn scene_get_lsmv(scene: Scene) -> Result<impl Responder<'static>, Error>
 {
 	_scene_get_lsmv(scene)
 }
 
+
+pub fn scene_config_options() -> Result<impl Responder<'static>, Error>
+{
+	Ok(SendFileAsWithCors{
+		content_type: "text/plain",
+		content: Vec::new(),
+		methods: SCENE_CONFIG_METHODS,
+		headers: SCENE_CONFIG_HEADERS
+	})
+}
+
+pub fn scene_config_get(scene: Scene) -> Result<impl Responder<'static>, Error>
+{
+	let conn = db_connect();
+	let (_w, _h) = if let Some(row) = conn.query("SELECT width, height FROM scenes WHERE sceneid=$1", &[&scene]).
+		unwrap().iter().next() {
+		let w: i32 = row.get(0);
+		let h: i32 = row.get(1);
+		(w, h)
+	} else {
+		return Err(Error::SceneNotFound);
+	};
+	let mut content = Vec::new();
+	if File::open(format!("/home/pbn/sconfigs/{}", scene.as_inner())).and_then(|mut f|f.read_to_end(
+		&mut content)).is_err() {
+		return Ok(SendFileAsWithCors{
+			content_type: "application/octet-stream",
+			content: Vec::new(),
+			methods: SCENE_CONFIG_METHODS,
+			headers: SCENE_CONFIG_HEADERS
+		})
+	}
+	return Ok(SendFileAsWithCors{
+		content_type: "application/octet-stream",
+		content: content,
+		methods: SCENE_CONFIG_METHODS,
+		headers: SCENE_CONFIG_HEADERS
+	})
+}
+
+pub fn scene_config_put(scene: Scene, auth: AuthenticationInfo, upload: Data) ->
+	Result<impl Responder<'static>, Error>
+{
+	let mut conn = db_connect();
+
+	match auth.check_write(&mut conn, scene) {
+		Ok(_) => (),
+		Err(false) => return Err(sink_put(upload, Error::SceneNotFound)),	//Don't barf.
+		Err(true) => return Err(sink_put(upload, Error::InvalidOrigin)),	//Don't barf.
+	};
+	let mut upload = upload.open();
+	let mut upbuf = [0;16385];
+	let mut fill = 0;
+	loop {
+		if fill >= upbuf.len() {
+			return Err(sink_put_remaining(upload, Error::ConfigTooBig));
+		}
+		let amt = upload.read(&mut upbuf[fill..]).unwrap();
+		if amt == 0 { break; }
+		fill += amt;
+	}
+	let tname = format!("/home/pbn/sconfigs/{}.tmp", scene.as_inner());
+	let fname = format!("/home/pbn/sconfigs/{}", scene.as_inner());
+	File::create(&tname).and_then(|mut f|f.write_all(&upbuf[..fill])).unwrap();
+	rename(&tname, &fname).unwrap();
+	//Ok.
+	return Ok(SendFileAsWithCors{
+		content_type: "text/plain",
+		content: Vec::new(),
+		methods: SCENE_CONFIG_METHODS,
+		headers: SCENE_CONFIG_HEADERS
+	})
+}

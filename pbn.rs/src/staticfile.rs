@@ -45,7 +45,7 @@ impl<'r,R:Responder<'r>> Responder<'r> for MoreContentTypeGuessing<'r,R>
 }
 
 //Pathbuf as parameter does not accept path transversal.
-pub fn serve_file(file: PathBuf) -> impl Responder<'static> //Option<MoreContentTypeGuessing<'static,NamedFile>> {
+pub fn serve_file(file: PathBuf) -> impl Responder<'static>
 {
 	NamedFile::open(Path::new("/home/pbn/static/").join(&file)).ok().map(|f|MoreContentTypeGuessing::new(f,
 		file))
