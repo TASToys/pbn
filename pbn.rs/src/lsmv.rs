@@ -1,4 +1,4 @@
-use super::{db_connect,Error, Scene};
+use super::{db_connect,Error, Scene, add_default_headers};
 use rocket::request::Request;
 use rocket::response::{Responder, Response};
 use rocket::http::{Header, Status};
@@ -132,6 +132,7 @@ impl<'r> Responder<'r> for SendFileAs
 		response.set_status(Status::new(200, "OK"));
 		response.set_header(Header::new("Content-Type", self.0));
 		response.set_sized_body(Cursor::new(self.1));
+		add_default_headers(&mut response);
 		Ok(response)
 	}
 }

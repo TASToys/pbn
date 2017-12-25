@@ -1,6 +1,7 @@
 use rocket::request::Request;
 use rocket::response::{Responder, Response};
 use rocket::http::{Header, Status};
+use super::add_default_headers;
 use std::io::Cursor;
 
 #[derive(Debug)]
@@ -32,6 +33,7 @@ impl<'r> Responder<'r> for SendFileAsWithCors
 				response.set_header(Header::new("Access-Control-Allow-Headers", self.headers));
 			}
 		}}
+		add_default_headers(&mut response);
 		response.set_sized_body(Cursor::new(self.content));
 		Ok(response)
 	}

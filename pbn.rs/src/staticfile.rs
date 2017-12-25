@@ -1,4 +1,4 @@
-use super::root_path;
+use super::{root_path, add_default_headers};
 use rocket::request::Request;
 use rocket::response::{Responder, Response, NamedFile};
 use rocket::http::{Status, ContentType};
@@ -38,6 +38,7 @@ impl<'r,R:Responder<'r>> Responder<'r> for MoreContentTypeGuessing<'r,R>
 				let (top, sub) = Self::guess_more(&self.1);
 				ans.set_header(ContentType::new(top, sub));
 			}
+			add_default_headers(&mut ans);
 			Ok(ans)
 		} else {
 			ans

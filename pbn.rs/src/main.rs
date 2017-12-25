@@ -7,12 +7,15 @@ extern crate postgres;
 extern crate md5;
 extern crate rand;
 extern crate libc;
+extern crate time;
 use postgres::{Connection, TlsMode};
 use rocket::request::Form;
-use rocket::response::Responder;
+use rocket::response::{Response, Responder};
+use rocket::http::Header;
 use rocket::Data;
 use std::char::from_u32;
 use std::fs::File;
+use std::path::Path;
 use std::io::Read as IoRead;
 use std::fmt::Write as FmtWrite;
 use std::path::PathBuf;
@@ -20,6 +23,11 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use std::ffi::CStr;
 use libc::{getuid, getpwuid};
+
+#[macro_use]
+pub mod xml;
+use xml::{XmlSerializer, XmlOutputStream, CONTENT_TYPE_XHTML};
+use xml::xhtml::Html;
 
 mod json;
 mod lsmv;
@@ -42,7 +50,9 @@ use scene_endpoint::{scene_get as _scene_get, scene_options as _scene_options,
 	scene_edit_delete as _scene_edit_delete, scene_edit_options as _scene_edit_options,
 	scene_edit_post as _scene_edit_post, scene_edit_put as _scene_edit_put, scene_get_png as _scene_get_png,
 	scene_get_lsmv as _scene_get_lsmv, GetBounds, ScenePostForm, scene_config_options as _scene_config_options,
-	scene_config_get as _scene_config_get, scene_config_put as _scene_config_put};
+	scene_config_get as _scene_config_get, scene_config_put as _scene_config_put,
+	scene_describe as _scene_describe, Xss};
+
 
 fn db_connect() -> Connection
 {
@@ -161,6 +171,43 @@ fn scene_config_put(scene: Option<Scene>, auth: AuthenticationInfo, upload: Data
 	}
 }
 
+#[get("/scenes/<scene>/describe")]
+fn scene_describe(scene: Option<Scene>, xss: Xss) -> Result<impl Responder<'static>, Error>
+{
+	let scene = scene.ok_or(Error::SceneNotFound)?;
+	_scene_describe(scene, xss)
+}
+
+//Pathbuf as parameter does not accept path transversal.
+#[get("/app/<file..>")]
+fn serve_app(file: PathBuf) -> Result<impl Responder<'static>, Error>
+{
+	eprintln!("App request for '{}'", file.display());
+	let rpath = root_path();
+	let bpath = Path::new(&format!("{}/static/apps/", rpath)).join(&file);
+	let jpath = bpath.join("main.js");
+	let cpath = bpath.join("main.css");
+	if !jpath.is_file() { return Err(Error::NotFound); }
+	let mut xml = XmlSerializer::new();
+	xml.set_content_type(CONTENT_TYPE_XHTML);
+	xml.tag_fn(Html, |xml|{
+		xml.tag_fn(tag!(head), |xml|{
+			if cpath.is_file() {
+				xml.impulse(tag!(link attr!(rel="stylesheet"), attr!(type="text/css"),
+					attr!(href=format!("/{}", cpath.strip_prefix(&rpath).unwrap().display()))));
+			}
+			xml.impulse(tag!(script attr!(type="text/javascript"), attr!(src=format!("/{}", jpath.
+				strip_prefix(&rpath).unwrap().display()))));
+			xml.tag_fn(tag!(title), |xml|{
+				xml.text(&format!("{}", file.display()));
+			});
+		});
+		xml.tag_fn(tag!(body), |_|{
+		});
+	});
+	Ok(xml)
+}
+
 fn sink_put_remaining<R:IoRead,T:Sized>(mut stream: R, error: T) -> T
 {
 	//Read the event stream to the end to avoid Rocket barfing.
@@ -178,11 +225,14 @@ fn main() {
 	rocket::ignite().mount("/", routes![
 		//Static files,
 		serve_static_files,
+		//Applications.
+		serve_app,
 		//Scene.
 		scene_options,
 		scene_get,
 		scene_get_lsmv,
 		scene_get_png,
+		scene_describe,
 		//Scene edit.
 		scene_edit_options,
 		scene_edit_put,
@@ -286,7 +336,16 @@ fn root_path() -> String
 	path
 }
 
+fn add_default_headers(response: &mut Response)
+{
+	response.set_header(Header::new("X-XSS-Protection", "0"));
+	response.set_header(Header::new("X-Content-Type-Options", "nosniff"));
+	response.set_header(Header::new("Content-Security-Policy",
+		"default-src https://*; script-src 'self'; object-src 'none'; style-src 'self'; \
+		font-src 'self';"));
+	response.set_header(Header::new("Referrer-Policy", "no-referrer"));
 
+}
 
 #[cfg(test)]
 mod tests;

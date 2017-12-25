@@ -1,0 +1,15 @@
+.box {
+	border:3px;
+	border-style:solid;
+	border-color:#0f0;
+	background:#cfc;
+	padding: 1em;
+}
+
+.ibox {
+	border:3px;
+	border-style:solid;
+	border-color:#ff0;
+	background:#ffc;
+	padding: 1em;
+}

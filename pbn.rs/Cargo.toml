@@ -2,12 +2,14 @@
 name = "pbn-rs"
 version = "0.1.0"
 authors = ["pbn"]
+build = "build.rs"
 
 [dependencies]
 postgres = "0.15"
 md5 = "0.3.6"
 rand = "0.3.18"
 libc = "0.2"
+time = "0.1"
 
 [dependencies.rocket]
 path = "Rocket/lib"

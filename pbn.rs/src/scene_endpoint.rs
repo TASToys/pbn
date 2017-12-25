@@ -7,12 +7,17 @@ use ::lsmv::scene_get_lsmv as _scene_get_lsmv;
 use ::mmapstate::MmapImageState;
 use ::png::{scan_image_as_png, scan_image_as_png_size};
 use ::scene::Scene;
+use ::xml::{XmlSerializer, XmlOutputStream};
+use ::xml::xhtml::Html;
+use ::xml::CONTENT_TYPE_XHTML;
 use rocket::request::{FromRequest, FromForm, Form, FormItems, Request};
 use rocket::outcome::Outcome;
 use rocket::response::Responder;
 use rocket::http::Status;
 use rocket::http::uri::Uri;
 use rocket::Data;
+use time::Timespec;
+use time::at_utc;
 use std::borrow::Cow;
 use std::fmt::Write as FmtWrite;
 use std::io::Write as IoWrite;
@@ -43,16 +48,10 @@ impl<'a, 'r> FromRequest<'a, 'r> for GetBounds
 	fn from_request(request: &'a Request<'r>) -> Outcome<GetBounds, (Status, ()), ()> {
 		let mut start = None;
 		let mut end = None;
-		let query = request.uri().query().unwrap_or("");
-		for i in query.split("&") {
-			let i = Uri::percent_decode(i.as_bytes()).unwrap_or(Cow::Borrowed(""));
-			let p = i.deref();
-			if p.starts_with("since=") {
-				i64::from_str(&p[6..]).map(|x|start = Some(x)).ok();
-			}
-			if p.starts_with("until=") {
-				i64::from_str(&p[6..]).map(|x|end = Some(x)).ok();
-			}
+		for p in request.uri().query().unwrap_or("").split("&").map(|i|Uri::percent_decode(i.as_bytes()).
+			unwrap_or(Cow::Borrowed(""))) {
+			if p.starts_with("since=") { i64::from_str(&p[6..]).map(|x|start = Some(x)).ok(); }
+			if p.starts_with("until=") { i64::from_str(&p[6..]).map(|x|end = Some(x)).ok(); }
 		}
 		Outcome::Success(GetBounds{start, end})
 	}
@@ -493,4 +492,90 @@ pub fn scene_config_put(scene: Scene, auth: AuthenticationInfo, upload: Data) ->
 		methods: SCENE_CONFIG_METHODS,
 		headers: SCENE_CONFIG_HEADERS
 	})
+}
+
+fn format_time(ts: i64, tsbase: i64) -> String
+{
+	const MIN_VALID_TIME: i64 = 0;//1000000000000;
+	let tsd = ts.saturating_sub(tsbase);
+	let tsdsign = if tsd >=0 { "+" } else { "-" };
+	if ts < MIN_VALID_TIME {
+		//Not valid time, only give delta
+		format!("{}{}.{:03}s", tsdsign, tsd / 1000, tsd % 1000)
+	} else {
+		//Valid time, give also decode.
+		let t = at_utc(Timespec{sec: ts / 1000, nsec: 0});
+		let t = t.strftime("%Y-%m-%d %H:%M:%S").unwrap();
+		format!("{t}.{f:03} <{sign}{i}.{df:03}s>", t=t, i=tsd / 1000, f=ts % 1000, df = tsd % 1000,
+			sign=tsdsign)
+	}
+}
+
+pub struct Xss(Option<String>);
+
+impl<'a, 'r> FromRequest<'a, 'r> for Xss
+{
+	type Error = ();
+	fn from_request(request: &'a Request<'r>) -> Outcome<Xss, (Status, ()), ()> {
+		let mut xss = None;
+		for p in request.uri().query().unwrap_or("").split("&").map(|i|Uri::percent_decode(i.as_bytes()).
+			unwrap_or(Cow::Borrowed(""))) {
+			if p.starts_with("xss=") { xss = Some((&p[4..]).to_owned()); }
+		}
+		Outcome::Success(Xss(xss))
+	}
+}
+
+pub fn scene_describe(scene: Scene, xss: Xss) -> Result<impl Responder<'static>, Error>
+{
+	let conn = db_connect();
+	let (w, h, name) = if let Some(row) = conn.query("SELECT width, height, name FROM scenes WHERE sceneid=$1",
+		&[&scene]).
+		unwrap().iter().next() {
+		let w: i32 = row.get(0);
+		let h: i32 = row.get(1);
+		let name: String = row.get(2);
+		(w, h, name)
+	} else {
+		return Err(Error::SceneNotFound);
+	};
+	let mut xml = XmlSerializer::new();
+	xml.set_content_type(CONTENT_TYPE_XHTML);
+	xml.tag_fn(Html, |xml|{
+		xml.tag_fn(tag!(head), |xml|{
+			xml.impulse(tag!(link attr!(rel="stylesheet"), attr!(type="text/css"),
+				attr!(href="/static/describe.css")));
+			xml.tag_fn(tag!(title), |xml|{
+				xml.text(&format!("Scene: {}", name));
+			});
+		});
+		xml.tag_fn(tag!(body), |xml|{
+			xml.tag_fn(tag!(div attr!(class="box")), |xml|{
+				xml.text(&format!("Size: {}x{} Name: '{}'", w, h, name));
+				if let Some(ref xss) = xss.0.as_ref() { xml.text(&format!(" XSS: {}", xss)); }
+			});
+			let mut timebase = None;
+			xml.tag_fn(tag!(div attr!(class="box")), |xml|{
+				for row in conn.query("SELECT timestamp,username,color,x,y FROM scene_data WHERE \
+					sceneid=$1 ORDER BY timestamp, recordid", &[&scene]).unwrap().iter() {
+					let ts: i64 = row.get(0);
+					let username: String = row.get(1);
+					let color: i32 = row.get(2);
+					let x: i32 = row.get(3);
+					let y: i32 = row.get(4);
+					if timebase.is_none() { timebase = Some(ts); }
+					xml.tag_fn(tag!(div attr!(class="ibox")), |xml|{
+						let cr = (color >> 16) & 255;
+						let cg = (color >> 8) & 255;
+						let cb = color & 255;
+						//Timebase is guaranteed to be non-none here.
+						xml.text(&format!("at {} by '{}': ({},{}) <- ({},{},{})",
+							format_time(ts, timebase.unwrap()), username, x, y, cr,
+							cg, cb));
+					});
+				}
+			});
+		});
+	});
+	Ok(xml)
 }
