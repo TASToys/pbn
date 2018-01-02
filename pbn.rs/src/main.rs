@@ -52,6 +52,8 @@ use scene_endpoint::{scene_get as _scene_get, scene_options as _scene_options,
 	scene_get_lsmv as _scene_get_lsmv, GetBounds, ScenePostForm, scene_config_options as _scene_config_options,
 	scene_config_get as _scene_config_get, scene_config_put as _scene_config_put,
 	scene_describe as _scene_describe, Xss};
+mod nistpqctest;
+use nistpqctest::nistpqctest as _nistpqctest;
 
 
 fn db_connect() -> Connection
@@ -208,6 +210,12 @@ fn serve_app(file: PathBuf) -> Result<impl Responder<'static>, Error>
 	Ok(xml)
 }
 
+#[get("/nistpqctest")]
+fn nistpqctest() -> impl Responder<'static>
+{
+	_nistpqctest()
+}
+
 fn sink_put_remaining<R:IoRead,T:Sized>(mut stream: R, error: T) -> T
 {
 	//Read the event stream to the end to avoid Rocket barfing.
@@ -246,6 +254,8 @@ fn main() {
 		scenes_options,
 		scenes_get,
 		scenes_post,
+		//test
+		nistpqctest,
 	]).launch();
 }
 

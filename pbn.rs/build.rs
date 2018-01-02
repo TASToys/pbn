@@ -13,7 +13,7 @@ const ATTRIBUTES: [(&'static str, &'static str);6] = [
 	("rel", "Rel"),
 ];
 
-const TAGS: [&'static str; 8] = [
+const TAGS: [&'static str; 12] = [
 	"p",
 	"span",
 	"div",
@@ -22,6 +22,10 @@ const TAGS: [&'static str; 8] = [
 	"body",
 	"link",
 	"script",
+	"table",
+	"tr",
+	"td",
+	"th",
 ];
 
 fn main()
