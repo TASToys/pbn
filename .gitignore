@@ -13,4 +13,7 @@ permtest.py
 permute.rs
 test.in
 testfile.json
-static/
+/static/
+/pbn.conf
+/sconfigs/
+/pbn.rs/Rocket/
